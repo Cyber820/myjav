@@ -1,5 +1,15 @@
+// vite.config.js
 import { defineConfig } from 'vite'
+import { resolve } from 'path'
 
 export default defineConfig({
-  // 你可以在这里加 base: '/repo-name/' 来适配 GitHub Pages
+  build: {
+    rollupOptions: {
+      input: {
+        index: resolve(__dirname, 'index.html'),
+        editor: resolve(__dirname, 'editor.html'),
+        'auth-callback': resolve(__dirname, 'auth-callback.html'),
+      },
+    },
+  },
 })
