@@ -1,4 +1,3 @@
-// vite.config.js (ESM safe)
 import { defineConfig } from 'vite'
 import { resolve, dirname } from 'path'
 import { fileURLToPath } from 'url'
