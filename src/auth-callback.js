@@ -1,50 +1,40 @@
-import { supabase } from './supabaseClient'
-import { cssBase } from './ui'
+// src/auth-callback.js
+import { supabase } from './supabaseClient.js'
 
-cssBase()
+const POST_LOGIN_PATH = '/editor.html'
+const FAIL_FALLBACK_PATH = '/index.html'
 
-const $app = document.getElementById('app')
-
-function setText(t) {
-  $app.textContent = t
+function setMsg(text) {
+  const el = document.getElementById('msg')
+  if (el) el.textContent = text
 }
 
-function hasParam(name) {
-  const u = new URL(window.location.href)
-  return u.searchParams.has(name)
-}
-
-async function handle() {
+async function main() {
   try {
-    setText('Signing in…')
+    setMsg('Exchanging session…')
 
-    // 兼容两种回调：
-    // 1) PKCE: ?code=xxxx
-    // 2) Implicit: #access_token=...&refresh_token=...
-    const url = window.location.href
+    // ✅ supabase-js v2: 用这个把 URL 里的 code/token 交换成 session，并写入本地存储
+    const { data, error } = await supabase.auth.exchangeCodeForSession(window.location.href)
 
-    if (hasParam('code')) {
-      const { error } = await supabase.auth.exchangeCodeForSession(url)
-      if (error) throw error
-    } else if (window.location.hash && window.location.hash.includes('access_token=')) {
-      const { error } = await supabase.auth.getSessionFromUrl({ storeSession: true })
-      if (error) throw error
-    }
-
-    // 确认 session 已就绪
-    const { data, error } = await supabase.auth.getSession()
-    if (error) throw error
-
-    if (!data?.session) {
-      setText('No session found. Please go back and try again.')
+    if (error) {
+      setMsg(`Auth failed: ${error.message}`)
       return
     }
 
-    setText('Signed in. Redirecting…')
-    window.location.replace('/editor.html')
-  } catch (e) {
-    setText(`Auth failed: ${e?.message ?? String(e)}`)
+    // 再保险：确认 session 真的存在
+    const { data: s2, error: e2 } = await supabase.auth.getSession()
+    if (e2 || !s2?.session) {
+      setMsg(`Auth failed: session not found after exchange`)
+      return
+    }
+
+    setMsg('Login OK. Redirecting…')
+    window.location.replace(POST_LOGIN_PATH)
+  } catch (err) {
+    setMsg(`Auth failed: ${err?.message ?? String(err)}`)
+    // 你也可以选择自动回退
+    // window.location.replace(FAIL_FALLBACK_PATH)
   }
 }
 
-handle()
+main()
