@@ -3,13 +3,11 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-"scripts": {
-  "dev": "vite",
-  "build": "vite build",
-  "postbuild": "node -e \"const fs=require('fs');console.log('DIST FILES:', fs.readdirSync('dist'));\"",
-  "preview": "vite preview --host 0.0.0.0 --port $PORT"
-}
-
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
   "dependencies": {
     "@supabase/supabase-js": "^2.49.1"
   },
