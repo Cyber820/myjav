@@ -1,0 +1,7 @@
+:{$PORT}
+
+root * /app/dist
+encode gzip
+
+# 多页面站点：不要全局回退到 /index.html
+file_server
