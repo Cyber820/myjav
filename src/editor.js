@@ -6,7 +6,7 @@ import { openActressCreateModal } from './actress-create.js'
 import { openMetaCreateModal } from './meta-create.js'
 import { openVideoCreateModal } from './video-create.js'
 
-// 搜索（本次接入）
+// 搜索（已接入）
 import { mountSearchEditPage } from './search/search-edit.js'
 
 function el(tag, attrs = {}, children = []) {
@@ -50,7 +50,14 @@ function norm(s) {
 
 /** ===== Auth UI ===== */
 function renderLoginCard({ host, setStatus }) {
-  const email = el('input', { class: 'af-input', type: 'email', placeholder: '输入邮箱以获取登录链接', autocomplete: 'email' })
+  const email = el('input', {
+    class: 'af-input',
+    type: 'email',
+    placeholder: '输入邮箱以获取登录链接',
+    autocomplete: 'email',
+    name: 'email',
+    id: 'login-email',
+  })
   const btn = el('button', { class: 'af-btn', type: 'button', html: '发送登录邮件' })
 
   btn.addEventListener('click', async () => {
@@ -62,8 +69,6 @@ function renderLoginCard({ host, setStatus }) {
     btn.disabled = true
     setStatus('正在发送登录邮件…')
     try {
-      // 注意：你之前已跑通 auth-callback.html 的 flow；
-      // 这里仅负责发邮件，回调页由你的 Supabase 配置决定。
       const { error } = await supabase.auth.signInWithOtp({
         email: addr,
         options: {
@@ -79,16 +84,17 @@ function renderLoginCard({ host, setStatus }) {
     }
   })
 
-  host.appendChild(el('div', { class: 'af-card' }, [
-    el('div', { class: 'af-row' }, [email, btn]),
-    el('div', { class: 'af-muted', style: 'margin-top:8px;' }, [
-      document.createTextNode('提示：登录成功后会自动返回本页并显示录入与检索功能。'),
-    ]),
-  ]))
+  host.appendChild(
+    el('div', { class: 'af-card' }, [
+      el('div', { class: 'af-row' }, [email, btn]),
+      el('div', { class: 'af-muted', style: 'margin-top:8px;' }, [
+        document.createTextNode('提示：登录成功后会自动返回本页并显示录入与检索功能。'),
+      ]),
+    ])
+  )
 }
 
 function renderAuthedUI({ host, user, setStatus }) {
-  // 顶部：三大录入按钮（左侧），右侧占位按钮已删除（按你需求）
   const btnActress = el('button', { class: 'af-btn', type: 'button', html: '录入女优' })
   const btnVideo = el('button', { class: 'af-btn', type: 'button', html: '录入影片' })
   const btnMeta = el('button', { class: 'af-btn', type: 'button', html: '录入其他信息' })
@@ -132,15 +138,14 @@ function renderAuthedUI({ host, user, setStatus }) {
   const searchCard = el('div', { class: 'af-card' }, [
     el('div', { class: 'af-muted' }, [document.createTextNode('检索')]),
     el('div', { class: 'af-divider' }),
-    el('div', { id: 'af-search-host' }), // search-edit.js 会把这个容器当成“页面根”
+    el('div', { id: 'af-search-host' }),
   ])
 
   host.appendChild(header)
   host.appendChild(entryCard)
   host.appendChild(searchCard)
 
-  // mount search
-  // search-edit.js 会自行渲染输入框/按钮/结果网格/弹窗
+  // mount search（只 mount 一次；如果页面不被重建，搜索结果就不会丢）
   mountSearchEditPage({ containerId: 'af-search-host' })
 }
 
@@ -160,46 +165,68 @@ async function main() {
     statusEl.textContent = text || ''
   }
 
-  // 初始：显示标题（未登录也显示）
-  page.appendChild(el('div', { class: 'af-top' }, [
-    el('div', {}, [
-      el('div', { class: 'af-title' }, [document.createTextNode('MyJAV Editor')]),
-      el('div', { class: 'af-sub' }, [document.createTextNode('加载登录状态…')]),
-    ]),
-  ]))
-  page.appendChild(statusEl)
+  // 用于判断是否需要“重建 UI”
+  // 只在 user 的存在性变化（登录/退出）时重建，TOKEN_REFRESHED 不重建
+  let lastHasUser = null
+  let lastUserId = null
 
-  // 获取 session
-  const { data, error } = await supabase.auth.getSession()
-  if (error) setStatus(`getSession 失败：${error.message}`)
-
-  function rerender(session) {
-    // 清空除 status 以外全部重建
+  function hardRender(session) {
     page.innerHTML = ''
     page.appendChild(statusEl)
 
-    if (!session?.user) {
-      // 未登录
-      page.insertBefore(el('div', { class: 'af-top' }, [
-        el('div', {}, [
-          el('div', { class: 'af-title' }, [document.createTextNode('MyJAV Editor')]),
-          el('div', { class: 'af-sub' }, [document.createTextNode('请先登录。')]),
+    const user = session?.user || null
+    if (!user) {
+      page.insertBefore(
+        el('div', { class: 'af-top' }, [
+          el('div', {}, [
+            el('div', { class: 'af-title' }, [document.createTextNode('MyJAV Editor')]),
+            el('div', { class: 'af-sub' }, [document.createTextNode('请先登录。')]),
+          ]),
         ]),
-      ]), statusEl)
-
+        statusEl
+      )
       renderLoginCard({ host: page, setStatus })
     } else {
-      // 已登录
-      renderAuthedUI({ host: page, user: session.user, setStatus })
+      renderAuthedUI({ host: page, user, setStatus })
     }
+
+    lastHasUser = !!user
+    lastUserId = user?.id ?? null
   }
 
-  rerender(data?.session)
+  // 初始：先渲染一个“加载中”
+  page.appendChild(
+    el('div', { class: 'af-top' }, [
+      el('div', {}, [
+        el('div', { class: 'af-title' }, [document.createTextNode('MyJAV Editor')]),
+        el('div', { class: 'af-sub' }, [document.createTextNode('加载登录状态…')]),
+      ]),
+    ])
+  )
+  page.appendChild(statusEl)
 
-  // 监听登录态变化（并输出状态码/事件，便于你 debug）
+  // 初次 session
+  const { data, error } = await supabase.auth.getSession()
+  if (error) setStatus(`getSession 失败：${error.message}`)
+  hardRender(data?.session ?? null)
+
+  // 监听登录态变化：只在需要时重建；否则只更新状态栏
   supabase.auth.onAuthStateChange((event, session) => {
-    setStatus(`Auth event: ${event}\nHas session: ${!!session}\nUser: ${session?.user?.email ?? ''}`)
-    rerender(session)
+    const hasUser = !!session?.user
+    const userId = session?.user?.id ?? null
+
+    // 始终更新状态栏，方便你 debug
+    setStatus(`Auth event: ${event}\nHas session: ${!!session}\nHas user: ${hasUser}\nUser: ${session?.user?.email ?? ''}`)
+
+    // 只在“登录/退出/切换账号”时重建 UI
+    const needHardRender =
+      lastHasUser === null ||
+      hasUser !== lastHasUser ||
+      (hasUser && userId && userId !== lastUserId)
+
+    if (needHardRender) {
+      hardRender(session)
+    }
   })
 }
 
