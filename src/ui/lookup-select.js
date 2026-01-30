@@ -2,22 +2,13 @@
 import { supabase } from '../supabaseClient.js'
 
 /**
- * 复用组件：Lookup 下拉选择（支持搜索 + 单/多选）
+ * Lookup 下拉选择（支持搜索 + 单/多选）
  *
- * ✅ 新交互（按你的要求）：
- * - 默认收起：只显示标题 + 已选摘要 + “展开”
- * - 点击“展开”后：出现搜索框 + 候选列表 + 临时已选 chips
- * - 选择完必须点“确定”才提交到已选；点“取消”则丢弃本次临时选择
- *
- * API：
- * {
- *   element,
- *   refresh(),
- *   clear(),
- *   getSelected(),              // 提交后的已选 [{id,name},...]
- *   setSelectedByIds(ids),      // 直接设置“已选”（编辑预填）
- *   setSelectedByNames(names),
- * }
+ * ✅ UI（按你的要求）
+ * - 默认收起：标题 + 已选摘要 + 下拉箭头（▾）+ 清空（×）
+ * - 点击箭头：弹出上层窗口（overlay modal）
+ * - 在弹窗里搜索/选择 → 点“确定”提交；点“取消”丢弃草稿
+ * - “×”一键清空当前属性已选
  */
 
 const _cache = new Map()
@@ -37,32 +28,42 @@ function el(tag, attrs = {}, children = []) {
 
 function ensureStyles() {
   if (document.getElementById('af-lookup-select-style')) return
-  const style = el('style', { id: 'af-lookup-select-style', html: `
-    .af-lu{border:1px solid rgba(0,0,0,.20);border-radius:12px;padding:10px;box-sizing:border-box;min-width:280px;flex:1;}
-    .af-lu-head{display:flex;align-items:center;justify-content:space-between;gap:10px;}
-    .af-lu-title{font-size:13px;font-weight:700;}
-    .af-lu-actions{display:flex;gap:8px;align-items:center;}
-    .af-lu-btn{border:1px solid rgba(0,0,0,.25);background:#fff;border-radius:10px;padding:6px 10px;cursor:pointer;font-size:12px;}
-    .af-lu-btn:disabled{opacity:.6;cursor:not-allowed;}
+  const style = el('style', {
+    id: 'af-lookup-select-style',
+    html: `
+      .af-lu{border:1px solid rgba(0,0,0,.20);border-radius:12px;padding:10px;box-sizing:border-box;min-width:260px;flex:1;}
+      .af-lu-head{display:flex;align-items:center;justify-content:space-between;gap:10px;}
+      .af-lu-title{font-size:13px;font-weight:700;}
+      .af-lu-actions{display:flex;gap:8px;align-items:center;}
+      .af-lu-iconbtn{border:1px solid rgba(0,0,0,.25);background:#fff;border-radius:999px;width:30px;height:30px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;font-size:14px;line-height:1;}
+      .af-lu-iconbtn:disabled{opacity:.6;cursor:not-allowed;}
+      .af-lu-summary{margin-top:8px;font-size:12px;color:rgba(0,0,0,.70);white-space:pre-wrap;}
 
-    .af-lu-summary{margin-top:8px;font-size:12px;color:rgba(0,0,0,.70);white-space:pre-wrap;}
-    .af-lu-panel{margin-top:10px;border-top:1px dashed rgba(0,0,0,.18);padding-top:10px;display:none;}
-    .af-lu-input{width:100%;box-sizing:border-box;border:1px solid rgba(0,0,0,.25);border-radius:10px;padding:8px 10px;font-size:14px;}
-    .af-lu-hint{margin-top:6px;font-size:12px;color:rgba(0,0,0,.6);}
+      /* overlay modal */
+      .af-lu-overlay{position:fixed;inset:0;background:rgba(0,0,0,.35);display:flex;align-items:center;justify-content:center;z-index:99999;padding:16px;}
+      .af-lu-modal{width:min(860px,100%);max-height:85vh;overflow:auto;background:#fff;border:1px solid rgba(0,0,0,.20);border-radius:12px;padding:12px;box-sizing:border-box;}
+      .af-lu-modal-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px;}
+      .af-lu-modal-title{font-size:15px;font-weight:700;}
+      .af-lu-btn{border:1px solid rgba(0,0,0,.25);background:#fff;border-radius:10px;padding:8px 12px;cursor:pointer;font-size:13px;}
+      .af-lu-btn-primary{border-color:rgba(0,0,0,.45);font-weight:700;}
 
-    .af-lu-chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px;}
-    .af-chip{display:inline-flex;gap:6px;align-items:center;border:1px solid rgba(0,0,0,.20);border-radius:999px;padding:4px 10px;font-size:12px;background:rgba(0,0,0,.03);}
-    .af-chip-x{border:none;background:transparent;cursor:pointer;font-size:14px;line-height:1;}
+      .af-lu-input{width:100%;box-sizing:border-box;border:1px solid rgba(0,0,0,.25);border-radius:10px;padding:8px 10px;font-size:14px;}
+      .af-lu-hint{margin-top:6px;font-size:12px;color:rgba(0,0,0,.6);}
 
-    .af-lu-list{margin-top:10px;border:1px solid rgba(0,0,0,.15);border-radius:10px;overflow:hidden;max-height:220px;overflow:auto;}
-    .af-lu-item{padding:8px 10px;display:flex;justify-content:space-between;gap:10px;cursor:pointer;font-size:13px;}
-    .af-lu-item:hover{background:rgba(0,0,0,.04);}
-    .af-lu-item small{color:rgba(0,0,0,.55);}
-    .af-lu-empty{padding:10px;color:rgba(0,0,0,.6);font-size:12px;}
+      .af-lu-chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px;}
+      .af-chip{display:inline-flex;gap:6px;align-items:center;border:1px solid rgba(0,0,0,.20);border-radius:999px;padding:4px 10px;font-size:12px;background:rgba(0,0,0,.03);}
+      .af-chip-x{border:none;background:transparent;cursor:pointer;font-size:14px;line-height:1;}
 
-    .af-lu-foot{display:flex;justify-content:flex-end;gap:8px;margin-top:10px;}
-    .af-lu-status{margin-top:8px;font-size:12px;color:rgba(0,0,0,.6);white-space:pre-wrap;}
-  `})
+      .af-lu-list{margin-top:10px;border:1px solid rgba(0,0,0,.15);border-radius:10px;overflow:hidden;max-height:320px;overflow:auto;}
+      .af-lu-item{padding:8px 10px;display:flex;justify-content:space-between;gap:10px;cursor:pointer;font-size:13px;}
+      .af-lu-item:hover{background:rgba(0,0,0,.04);}
+      .af-lu-item small{color:rgba(0,0,0,.55);}
+      .af-lu-empty{padding:10px;color:rgba(0,0,0,.6);font-size:12px;}
+
+      .af-lu-foot{display:flex;justify-content:flex-end;gap:10px;margin-top:12px;}
+      .af-lu-status{margin-top:8px;font-size:12px;color:rgba(0,0,0,.6);white-space:pre-wrap;}
+    `,
+  })
   document.head.appendChild(style)
 }
 
@@ -109,54 +110,29 @@ export function createLookupSelect(opts) {
   const root = el('div', { class: 'af-lu' })
 
   const titleEl = el('div', { class: 'af-lu-title' }, [document.createTextNode(title ?? '选择')])
-  const btnRefresh = el('button', { class: 'af-lu-btn', type: 'button', html: '刷新' })
-  const btnToggle = el('button', { class: 'af-lu-btn', type: 'button', html: '展开' })
-  const headActions = el('div', { class: 'af-lu-actions' }, [btnRefresh, btnToggle])
+
+  // 刷新（可选保留）
+  const btnRefresh = el('button', { class: 'af-lu-iconbtn', type: 'button', html: '⟳', title: '刷新' })
+  // 清空：×
+  const btnClear = el('button', { class: 'af-lu-iconbtn', type: 'button', html: '×', title: '清空' })
+  // 下拉箭头：▾
+  const btnArrow = el('button', { class: 'af-lu-iconbtn', type: 'button', html: '▾', title: '展开选择' })
+
+  const headActions = el('div', { class: 'af-lu-actions' }, [btnRefresh, btnClear, btnArrow])
   const head = el('div', { class: 'af-lu-head' }, [titleEl, headActions])
 
   const summary = el('div', { class: 'af-lu-summary', html: '未选择' })
 
-  // panel（展开后出现）
-  const panel = el('div', { class: 'af-lu-panel' })
-  const input = el('input', { class: 'af-lu-input', type: 'text', placeholder })
-  const hintEl = el('div', { class: 'af-lu-hint' }, [
-    document.createTextNode(
-      hint || (mode === 'multi'
-        ? '展开后可搜索；点击条目可勾选/取消；点“确定”提交本次选择。'
-        : '展开后可搜索；点击条目选择一个；点“确定”提交本次选择。'
-      )
-    ),
-  ])
-  const list = el('div', { class: 'af-lu-list' })
-  const chips = el('div', { class: 'af-lu-chips' })
-  const status = el('div', { class: 'af-lu-status' })
-
-  const btnCancel = el('button', { class: 'af-lu-btn', type: 'button', html: '取消' })
-  const btnConfirm = el('button', { class: 'af-lu-btn', type: 'button', html: '确定' })
-  const foot = el('div', { class: 'af-lu-foot' }, [btnCancel, btnConfirm])
-
-  panel.appendChild(input)
-  panel.appendChild(hintEl)
-  panel.appendChild(list)
-  panel.appendChild(chips)
-  panel.appendChild(foot)
-  panel.appendChild(status)
-
   root.appendChild(head)
   root.appendChild(summary)
-  root.appendChild(panel)
 
   /** @type {{id:any, name:string}[]} */
   let all = []
 
-  /** committed: 提交后的已选 */
+  /** committed */
   const selected = new Map()
-  /** draft: 展开期间临时已选（点确定才提交到 selected） */
+  /** draft (modal open) */
   let draft = new Map()
-
-  function setStatus(text) {
-    status.textContent = text || ''
-  }
 
   function setSummary() {
     if (selected.size === 0) {
@@ -172,118 +148,14 @@ export function createLookupSelect(opts) {
     summary.textContent = `已选：${names.join('、')}`
   }
 
-  function renderChips() {
-    chips.innerHTML = ''
-    if (draft.size === 0) return
-    for (const item of draft.values()) {
-      const x = el('button', { class: 'af-chip-x', type: 'button', html: '×' })
-      x.addEventListener('click', () => {
-        draft.delete(item.id)
-        renderChips()
-        renderList()
-      })
-      chips.appendChild(el('span', { class: 'af-chip' }, [document.createTextNode(item.name), x]))
-    }
-  }
-
-  function renderList() {
-    const q = norm(input.value)
-    const shown = q ? all.filter(r => contains(r.name, q)) : all
-
-    list.innerHTML = ''
-    if (shown.length === 0) {
-      list.appendChild(el('div', { class: 'af-lu-empty', html: '没有匹配项' }))
-      return
-    }
-
-    for (const item of shown) {
-      const picked = draft.has(item.id)
-      const right = el('small', {}, [document.createTextNode(picked ? '已选' : '')])
-      const row = el('div', { class: 'af-lu-item' }, [
-        document.createTextNode(item.name),
-        right,
-      ])
-
-      row.addEventListener('click', () => {
-        if (mode === 'single') {
-          draft.clear()
-          draft.set(item.id, item)
-        } else {
-          if (draft.has(item.id)) draft.delete(item.id)
-          else draft.set(item.id, item)
-        }
-        renderChips()
-        renderList()
-      })
-
-      list.appendChild(row)
-    }
-  }
-
-  function openPanel() {
-    panel.style.display = 'block'
-    btnToggle.textContent = '收起'
-    // 打开时：draft = 当前已选（拷贝），避免“取消”影响 committed
-    draft = cloneMap(selected)
-    input.value = ''
-    renderChips()
-    renderList()
-    input.focus()
-  }
-
-  function closePanel() {
-    panel.style.display = 'none'
-    btnToggle.textContent = '展开'
-    input.value = ''
-    setStatus('')
-  }
-
-  function togglePanel() {
-    if (panel.style.display === 'block') closePanel()
-    else openPanel()
-  }
-
-  async function refresh() {
-    btnRefresh.disabled = true
-    setStatus('正在加载…')
-    try {
-      all = await fetchLookup({ table, idCol, nameCol, orderAsc: true })
-      setStatus(`已加载：${all.length} 条`)
-      // 重新加载后，重建 selected/draft 映射（避免旧引用）
-      // selected 保留原 id，只要 id 仍存在就恢复 name
-      const keep = new Map()
-      for (const item of all) {
-        if (selected.has(item.id)) keep.set(item.id, item)
-      }
-      selected.clear()
-      for (const [k, v] of keep.entries()) selected.set(k, v)
-
-      setSummary()
-      // 若 panel 打开，则刷新可见列表/草稿
-      if (panel.style.display === 'block') {
-        draft = cloneMap(selected)
-        renderChips()
-        renderList()
-      }
-    } catch (e) {
-      setStatus(`加载失败：${e?.message ?? String(e)}`)
-    } finally {
-      btnRefresh.disabled = false
-    }
+  function getSelected() {
+    return Array.from(selected.values())
   }
 
   function clear() {
     selected.clear()
     draft.clear()
     setSummary()
-    if (panel.style.display === 'block') {
-      renderChips()
-      renderList()
-    }
-  }
-
-  function getSelected() {
-    return Array.from(selected.values())
   }
 
   function setSelectedByIds(ids) {
@@ -293,11 +165,6 @@ export function createLookupSelect(opts) {
       if (set.has(`${item.id}`)) selected.set(item.id, item)
     }
     setSummary()
-    if (panel.style.display === 'block') {
-      draft = cloneMap(selected)
-      renderChips()
-      renderList()
-    }
   }
 
   function setSelectedByNames(names) {
@@ -307,30 +174,182 @@ export function createLookupSelect(opts) {
       if (set.has(norm(item.name))) selected.set(item.id, item)
     }
     setSummary()
-    if (panel.style.display === 'block') {
-      draft = cloneMap(selected)
-      renderChips()
-      renderList()
+  }
+
+  async function refresh() {
+    btnRefresh.disabled = true
+    try {
+      all = await fetchLookup({ table, idCol, nameCol, orderAsc: true })
+
+      // 保留原选择（按 id 对齐）
+      const keep = new Map()
+      for (const item of all) {
+        if (selected.has(item.id)) keep.set(item.id, item)
+      }
+      selected.clear()
+      for (const [k, v] of keep.entries()) selected.set(k, v)
+
+      setSummary()
+    } finally {
+      btnRefresh.disabled = false
     }
   }
 
-  // events
-  btnToggle.addEventListener('click', togglePanel)
-  btnRefresh.addEventListener('click', refresh)
-  input.addEventListener('input', renderList)
+  // ====== Modal UI ======
+  let overlay = null
 
-  btnCancel.addEventListener('click', () => {
-    // 丢弃草稿，收起
-    draft = new Map()
-    closePanel()
+  function openModal() {
+    // 初始化草稿为当前已选
+    draft = cloneMap(selected)
+
+    overlay = el('div', { class: 'af-lu-overlay' })
+    const modal = el('div', { class: 'af-lu-modal', role: 'dialog', 'aria-modal': 'true' })
+    overlay.appendChild(modal)
+
+    const modalTitle = el('div', { class: 'af-lu-modal-title' }, [
+      document.createTextNode(title ?? '选择'),
+    ])
+    const btnClose = el('button', { class: 'af-lu-btn', type: 'button', html: '关闭' })
+    const modalHead = el('div', { class: 'af-lu-modal-head' }, [modalTitle, btnClose])
+
+    const input = el('input', { class: 'af-lu-input', type: 'text', placeholder })
+    const hintEl = el('div', { class: 'af-lu-hint' }, [
+      document.createTextNode(
+        hint || (mode === 'multi'
+          ? '输入搜索；点击条目勾选/取消；点“确定”提交本次选择。'
+          : '输入搜索；点击条目选择一个；点“确定”提交本次选择。'
+        )
+      ),
+    ])
+
+    const chips = el('div', { class: 'af-lu-chips' })
+    const list = el('div', { class: 'af-lu-list' })
+    const status = el('div', { class: 'af-lu-status' })
+
+    const btnCancel = el('button', { class: 'af-lu-btn', type: 'button', html: '取消' })
+    const btnConfirm = el('button', { class: 'af-lu-btn af-lu-btn-primary', type: 'button', html: '确定' })
+    const foot = el('div', { class: 'af-lu-foot' }, [btnCancel, btnConfirm])
+
+    modal.appendChild(modalHead)
+    modal.appendChild(input)
+    modal.appendChild(hintEl)
+    modal.appendChild(list)
+    modal.appendChild(chips)
+    modal.appendChild(foot)
+    modal.appendChild(status)
+
+    document.body.appendChild(overlay)
+
+    btnArrow.innerHTML = '▴'
+    btnArrow.title = '收起'
+    btnArrow.disabled = true // modal 打开期间避免重复打开
+
+    function setStatus(text) {
+      status.textContent = text || ''
+    }
+
+    function renderChips() {
+      chips.innerHTML = ''
+      if (draft.size === 0) return
+      for (const item of draft.values()) {
+        const x = el('button', { class: 'af-chip-x', type: 'button', html: '×', title: '移除' })
+        x.addEventListener('click', () => {
+          draft.delete(item.id)
+          renderChips()
+          renderList()
+        })
+        chips.appendChild(el('span', { class: 'af-chip' }, [document.createTextNode(item.name), x]))
+      }
+    }
+
+    function renderList() {
+      const q = norm(input.value)
+      const shown = q ? all.filter(r => contains(r.name, q)) : all
+
+      list.innerHTML = ''
+      if (shown.length === 0) {
+        list.appendChild(el('div', { class: 'af-lu-empty', html: '没有匹配项' }))
+        return
+      }
+
+      for (const item of shown) {
+        const picked = draft.has(item.id)
+        const right = el('small', {}, [document.createTextNode(picked ? '已选' : '')])
+        const row = el('div', { class: 'af-lu-item' }, [
+          document.createTextNode(item.name),
+          right,
+        ])
+
+        row.addEventListener('click', () => {
+          if (mode === 'single') {
+            draft.clear()
+            draft.set(item.id, item)
+          } else {
+            if (draft.has(item.id)) draft.delete(item.id)
+            else draft.set(item.id, item)
+          }
+          renderChips()
+          renderList()
+        })
+
+        list.appendChild(row)
+      }
+    }
+
+    function closeModal({ commit = false } = {}) {
+      if (!overlay) return
+      if (commit) {
+        selected.clear()
+        for (const [k, v] of draft.entries()) selected.set(k, v)
+        setSummary()
+      }
+      overlay.remove()
+      overlay = null
+      draft = new Map()
+
+      btnArrow.disabled = false
+      btnArrow.innerHTML = '▾'
+      btnArrow.title = '展开选择'
+      document.removeEventListener('keydown', onEsc)
+    }
+
+    function onEsc(e) {
+      if (e.key === 'Escape') closeModal({ commit: false })
+    }
+
+    // events
+    input.addEventListener('input', renderList)
+    btnClose.addEventListener('click', () => closeModal({ commit: false }))
+    btnCancel.addEventListener('click', () => closeModal({ commit: false }))
+    btnConfirm.addEventListener('click', () => closeModal({ commit: true }))
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) closeModal({ commit: false }) })
+    document.addEventListener('keydown', onEsc)
+
+    // init content
+    setStatus(`候选：${all.length} 条`)
+    renderList()
+    renderChips()
+    input.focus()
+  }
+
+  // ===== events on compact view =====
+  btnArrow.addEventListener('click', () => {
+    // modal 打开时 btnArrow 会 disabled，这里只处理打开
+    openModal()
   })
 
-  btnConfirm.addEventListener('click', () => {
-    // 提交草稿到 selected
-    selected.clear()
-    for (const [k, v] of draft.entries()) selected.set(k, v)
-    setSummary()
-    closePanel()
+  btnClear.addEventListener('click', () => {
+    clear()
+  })
+
+  btnRefresh.addEventListener('click', async () => {
+    try {
+      // 给一个轻量反馈：不额外加 status bar，避免撑高
+      btnRefresh.disabled = true
+      await refresh()
+    } finally {
+      btnRefresh.disabled = false
+    }
   })
 
   // init
