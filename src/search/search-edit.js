@@ -12,9 +12,8 @@ import { supabase } from '../supabaseClient.js'
  *   - actress：update actress
  *   - video：update video + delete all link rows by video_id + insert new link rows
  *
- * 重要修复：
- * - video 的关联项预填：不再靠“名称预填”，而是通过 link 表取 *_id 列表预填（稳定）
- * - 选择器：内置可搜索的单选/多选弹窗（不依赖外部 lookup-select）
+ * ✅ 本版新增：
+ * - video.personal_sex_rate（UI 名称：XXX评分）展示/编辑/保存
  */
 
 /* =========================
@@ -167,12 +166,15 @@ function makePicker({ title, multi, table, idCol, nameCol }) {
     if (!names.length) labelText = '请选择'
     else if (!multi) labelText = names[0]
     else labelText = names.join('、')
-    btn.querySelector('span')?.replaceWith(el('span', {}, [document.createTextNode(labelText)]))
+
+    const firstSpan = btn.querySelector('span')
+    if (firstSpan) firstSpan.textContent = labelText
   }
 
   async function openPopup() {
     const options = await loadOptions({ table, idCol, nameCol })
     lastOptions = options
+
     const overlay = el('div', { class: 'af-pop-overlay' })
     const pop = el('div', { class: 'af-pop' })
     overlay.appendChild(pop)
@@ -201,9 +203,8 @@ function makePicker({ title, multi, table, idCol, nameCol }) {
       }
 
       for (const o of filtered) {
-        const checked = temp.has(o.id)
         const input = el('input', { type: multi ? 'checkbox' : 'radio' })
-        input.checked = checked
+        input.checked = temp.has(o.id)
 
         const row = el('div', { class: 'af-pop-item' }, [
           input,
@@ -270,10 +271,6 @@ function makePicker({ title, multi, table, idCol, nameCol }) {
     },
     getSelectedIds() {
       return Array.from(selectedIds)
-    },
-    async getSelectedNames() {
-      if (!lastOptions.length) lastOptions = await loadOptions({ table, idCol, nameCol })
-      return lastOptions.filter(o => selectedIds.has(o.id)).map(o => o.name)
     },
   }
 }
@@ -396,7 +393,7 @@ async function fetchVideoDetail(video_id) {
     loadIds('video_tag', 'tag_id'),
   ])
 
-  // names for view mode (and nicer display)
+  // names for view mode
   const loadNames = async (table, idCol, nameCol, ids) => {
     if (!ids.length) return []
     const { data, error } = await supabase.from(table).select(`${idCol}, ${nameCol}`).in(idCol, ids).limit(5000)
@@ -524,6 +521,10 @@ function openEntityModal({ kind, title, initialDetail, onAfterSaved }) {
         { k: '场景', v: (detail.scenes || []).join('、') },
         { k: '标签', v: (detail.tags || []).join('、') },
         { k: '总体评分', v: v.video_personal_rate != null ? String(v.video_personal_rate) : '' },
+
+        // ✅ 新增展示：XXX评分（personal_sex_rate）
+        { k: 'XXX评分', v: v.personal_sex_rate != null ? String(v.personal_sex_rate) : '' },
+
         { k: '女优评分', v: v.overall_actress_personal_rate != null ? String(v.overall_actress_personal_rate) : '' },
         { k: '演技评分', v: v.personal_acting_rate != null ? String(v.personal_acting_rate) : '' },
         { k: '声音评分', v: v.personal_voice_rate != null ? String(v.personal_voice_rate) : '' },
@@ -632,6 +633,10 @@ function openEntityModal({ kind, title, initialDetail, onAfterSaved }) {
       const fLen = el('input', { class: 'af-text', type: 'number', value: v.length ?? '', min: '0' })
 
       const fRateAll = el('input', { class: 'af-text', type: 'number', value: v.video_personal_rate ?? '', min: '0', max: '100' })
+
+      // ✅ 新增：XXX评分（personal_sex_rate）
+      const fRateSex = el('input', { class: 'af-text', type: 'number', value: v.personal_sex_rate ?? '', min: '0', max: '100' })
+
       const fRateAct = el('input', { class: 'af-text', type: 'number', value: v.overall_actress_personal_rate ?? '', min: '0', max: '100' })
       const fRateActing = el('input', { class: 'af-text', type: 'number', value: v.personal_acting_rate ?? '', min: '0', max: '100' })
       const fRateVoice = el('input', { class: 'af-text', type: 'number', value: v.personal_voice_rate ?? '', min: '0', max: '100' })
@@ -666,7 +671,7 @@ function openEntityModal({ kind, title, initialDetail, onAfterSaved }) {
       const pScene = makePicker({ title: '选择场景', multi: true, table: 'scene', idCol: 'scene_id', nameCol: 'scene_name' })
       const pTag = makePicker({ title: '选择标签', multi: true, table: 'tag', idCol: 'tag_id', nameCol: 'tag_name' })
 
-      // 预加载选项 + 预填（关键修复：用 link_ids 预填）
+      // 预加载选项 + 预填（用 link_ids 预填关联）
       await Promise.all([pPublisher.preload(), pActress.preload(), pActressType.preload(), pCostume.preload(), pScene.preload(), pTag.preload()])
       if (v.publisher_id != null) pPublisher.setSelectedIds([v.publisher_id])
       pActress.setSelectedIds(detail.link_ids?.actress_ids || [])
@@ -707,10 +712,13 @@ function openEntityModal({ kind, title, initialDetail, onAfterSaved }) {
 
       form.appendChild(el('div', { class: 'af-row2' }, [
         el('div', { class: 'af-field' }, [el('div', { class: 'af-label' }, [document.createTextNode('总体评分（0-100）')]), fRateAll]),
-        el('div', { class: 'af-field' }, [el('div', { class: 'af-label' }, [document.createTextNode('女优评分（0-100）')]), fRateAct]),
+        el('div', { class: 'af-field' }, [el('div', { class: 'af-label' }, [document.createTextNode('XXX评分（0-100）')]), fRateSex]),
       ]))
       form.appendChild(el('div', { class: 'af-row2' }, [
+        el('div', { class: 'af-field' }, [el('div', { class: 'af-label' }, [document.createTextNode('女优评分（0-100）')]), fRateAct]),
         el('div', { class: 'af-field' }, [el('div', { class: 'af-label' }, [document.createTextNode('演技评分（0-100）')]), fRateActing]),
+      ]))
+      form.appendChild(el('div', { class: 'af-row2' }, [
         el('div', { class: 'af-field' }, [el('div', { class: 'af-label' }, [document.createTextNode('声音评分（0-100）')]), fRateVoice]),
       ]))
       form.appendChild(el('div', { class: 'af-field' }, [el('div', { class: 'af-label' }, [document.createTextNode('情节')]), fStory]))
@@ -734,12 +742,14 @@ function openEntityModal({ kind, title, initialDetail, onAfterSaved }) {
         const length = toNumOrNull(fLen.value)
 
         const video_personal_rate = toNumOrNull(fRateAll.value)
+        const personal_sex_rate = toNumOrNull(fRateSex.value)
         const overall_actress_personal_rate = toNumOrNull(fRateAct.value)
         const personal_acting_rate = toNumOrNull(fRateActing.value)
         const personal_voice_rate = toNumOrNull(fRateVoice.value)
 
         for (const [label, val] of [
           ['总体评分', video_personal_rate],
+          ['XXX评分', personal_sex_rate],
           ['女优评分', overall_actress_personal_rate],
           ['演技评分', personal_acting_rate],
           ['声音评分', personal_voice_rate],
@@ -769,6 +779,10 @@ function openEntityModal({ kind, title, initialDetail, onAfterSaved }) {
           censored,
           length,
           video_personal_rate,
+
+          // ✅ 新增写入
+          personal_sex_rate,
+
           overall_actress_personal_rate,
           personal_acting_rate,
           personal_voice_rate,
