@@ -1,12 +1,16 @@
 // src/search/search-edit.js
 import { supabase } from '../supabaseClient.js'
+import { createLookupSelect, LOOKUP_PRESETS } from '../ui/lookup-select.js'
 
 /**
- * Search (Edit route)
- * - 全宽豆腐块结果
- * - video 卡片显示：番号 + 关联女优
- * - 点击卡片弹窗显示详细信息（字段对齐录入）
- * - 预留：弹窗“进入编辑”按钮（后续接 video-edit / actress-edit）
+ * Search + View + Inline Edit (in modal)
+ * - 全宽豆腐块展示
+ * - video 卡片：标题只显示片名；小字显示「番号：」「女优：」
+ * - 点击卡片：弹窗显示详情
+ * - 弹窗右上角：编辑 → 直接在弹窗里编辑（预填）
+ * - 保存：
+ *   - actress：update actress
+ *   - video：update video + delete all link rows by video_id + insert new link rows
  */
 
 function el(tag, attrs = {}, children = []) {
@@ -30,16 +34,15 @@ function ensureStyles() {
       .af-page{padding:12px;max-width:none;}
       .af-bar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;}
       .af-input{width:min(720px,100%);box-sizing:border-box;border:1px solid rgba(0,0,0,.25);border-radius:10px;padding:10px 12px;font-size:14px;}
-      .af-btn{border:1px solid rgba(0,0,0,.25);background:#fff;border-radius:10px;padding:10px 14px;cursor:pointer;}
+      .af-btn{border:1px solid rgba(0,0,0,.25);background:#fff;border-radius:10px;padding:10px 14px;cursor:pointer;font-size:13px;}
       .af-btn:disabled{opacity:.6;cursor:not-allowed;}
       .af-hint{margin-top:8px;font-size:12px;color:rgba(0,0,0,.65);}
 
       .af-grid{margin-top:12px;display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px;width:100%;}
       .af-card{border:1px solid rgba(0,0,0,.14);border-radius:12px;padding:10px;cursor:pointer;background:#fff;}
       .af-card:hover{background:rgba(0,0,0,.02);}
-      .af-card-title{font-weight:700;font-size:14px;line-height:1.35;}
+      .af-card-title{font-weight:800;font-size:14px;line-height:1.35;}
       .af-card-sub{margin-top:6px;font-size:12px;color:rgba(0,0,0,.65);white-space:pre-wrap;}
-      .af-chip{display:inline-block;font-size:11px;border:1px solid rgba(0,0,0,.18);border-radius:999px;padding:2px 8px;margin-left:6px;color:rgba(0,0,0,.65);}
       .af-empty{margin-top:12px;font-size:12px;color:rgba(0,0,0,.6);}
       .af-err{margin-top:12px;color:#7a0000;background:rgba(200,0,0,.06);border:1px solid rgba(200,0,0,.25);border-radius:10px;padding:10px;white-space:pre-wrap;}
 
@@ -47,11 +50,24 @@ function ensureStyles() {
       .af-modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.35);display:flex;align-items:center;justify-content:center;z-index:99999;padding:16px;}
       .af-modal{width:min(980px,100%);max-height:88vh;overflow:auto;background:#fff;border:1px solid rgba(0,0,0,.20);border-radius:12px;padding:12px;box-sizing:border-box;}
       .af-modal-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px;}
-      .af-modal-title{font-size:15px;font-weight:800;}
+      .af-modal-title{font-size:15px;font-weight:900;}
+      .af-modal-actions{display:flex;gap:10px;align-items:center;}
+      .af-status{margin-top:8px;font-size:12px;color:rgba(0,0,0,.65);white-space:pre-wrap;}
       .af-kv{display:grid;grid-template-columns:180px 1fr;gap:8px 12px;align-items:start;}
       .af-k{font-size:12px;color:rgba(0,0,0,.65);padding-top:6px;}
       .af-v{font-size:13px;white-space:pre-wrap;word-break:break-word;border-bottom:1px dashed rgba(0,0,0,.10);padding:6px 0;}
-      .af-modal-foot{display:flex;justify-content:flex-end;gap:10px;margin-top:12px;}
+
+      /* edit form */
+      .af-form{display:flex;flex-direction:column;gap:10px;}
+      .af-field{display:flex;flex-direction:column;gap:6px;}
+      .af-label{font-size:12px;color:rgba(0,0,0,.70);font-weight:700;}
+      .af-text{box-sizing:border-box;border:1px solid rgba(0,0,0,.25);border-radius:10px;padding:9px 10px;font-size:14px;width:100%;}
+      .af-textarea{min-height:92px;resize:vertical;}
+      .af-row2{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
+      @media (max-width: 720px){ .af-row2{grid-template-columns:1fr;} }
+      .af-note{font-size:12px;color:rgba(0,0,0,.60);}
+      .af-foot{display:flex;justify-content:flex-end;gap:10px;margin-top:10px;}
+      .af-divider{height:1px;background:rgba(0,0,0,.08);margin:8px 0;}
     `,
   })
   document.head.appendChild(style)
@@ -73,40 +89,23 @@ function uniqBy(arr, keyFn) {
   return out
 }
 
-/** ====== 查询：一次输入同时跑三类 ====== */
+/** ========= Search Core ========= */
 async function runSearch(query) {
   const q = norm(query)
   if (!q) {
     return { query: q, actresses: [], videos: [], videoMetaById: new Map() }
   }
 
-  // 1) video_name
-  const p1 = supabase
-    .from('video')
-    .select('video_id, video_name, content_id')
-    .ilike('video_name', `%${q}%`)
-    .limit(50)
-
-  // 2) content_id
-  const p2 = supabase
-    .from('video')
-    .select('video_id, video_name, content_id')
-    .ilike('content_id', `%${q}%`)
-    .limit(50)
-
-  // 3) actress_name
-  const p3 = supabase
-    .from('actress')
-    .select('actress_id, actress_name')
-    .ilike('actress_name', `%${q}%`)
-    .limit(50)
+  const p1 = supabase.from('video').select('video_id, video_name, content_id').ilike('video_name', `%${q}%`).limit(50)
+  const p2 = supabase.from('video').select('video_id, video_name, content_id').ilike('content_id', `%${q}%`).limit(50)
+  const p3 = supabase.from('actress').select('actress_id, actress_name').ilike('actress_name', `%${q}%`).limit(50)
 
   const [r1, r2, r3] = await Promise.all([p1, p2, p3])
   const err = r1.error || r2.error || r3.error
   if (err) throw new Error(err.message)
 
-  const videosByName = (r1.data || []).map(v => ({ ...v, matched_by: 'video_name' }))
-  const videosByCid = (r2.data || []).map(v => ({ ...v, matched_by: 'content_id' }))
+  const videosByName = (r1.data || [])
+  const videosByCid = (r2.data || [])
   const actresses = (r3.data || [])
 
   // actress -> actress_in_video -> video
@@ -128,15 +127,14 @@ async function runSearch(query) {
         .in('video_id', videoIds)
         .limit(2000)
       if (e2) throw new Error(e2.message)
-      videosByActressLink = (vrows || []).map(v => ({ ...v, matched_by: 'actress_link' }))
+      videosByActressLink = (vrows || [])
     }
   }
 
   const videos = uniqBy([...videosByName, ...videosByCid, ...videosByActressLink], v => `${v.video_id}`)
 
-  // 为视频卡片准备：批量查每个 video 的关联女优名（用于卡片小字）
+  // For cards: actresses list
   const videoMetaById = await hydrateVideoCardMeta(videos.map(v => v.video_id))
-
   return { query: q, actresses, videos, videoMetaById }
 }
 
@@ -171,49 +169,27 @@ async function hydrateVideoCardMeta(videoIds) {
       .filter(Boolean)
     map.set(vid, { actresses: aNames })
   }
-
   return map
 }
 
-/** ====== 弹窗详情 ====== */
+/** ========= Detail fetch ========= */
 async function fetchVideoDetail(video_id) {
-  const { data: video, error: e0 } = await supabase
-    .from('video')
-    .select('*')
-    .eq('video_id', video_id)
-    .single()
+  const { data: video, error: e0 } = await supabase.from('video').select('*').eq('video_id', video_id).single()
   if (e0) throw new Error(e0.message)
 
-  // publisher name
   let publisherName = null
   if (video.publisher_id != null) {
-    const { data: p, error: eP } = await supabase
-      .from('publisher')
-      .select('publisher_name')
-      .eq('publisher_id', video.publisher_id)
-      .single()
+    const { data: p, error: eP } = await supabase.from('publisher').select('publisher_name').eq('publisher_id', video.publisher_id).single()
     if (!eP) publisherName = p?.publisher_name ?? null
   }
 
-  // helpers for many-to-many tables
   const loadNamesByLink = async (linkTable, idCol, targetTable, targetIdCol, targetNameCol) => {
-    const { data: links, error: e1 } = await supabase
-      .from(linkTable)
-      .select(`${idCol}`)
-      .eq('video_id', video_id)
-      .limit(5000)
+    const { data: links, error: e1 } = await supabase.from(linkTable).select(`${idCol}`).eq('video_id', video_id).limit(5000)
     if (e1) throw new Error(e1.message)
-
     const ids = uniqBy((links || []).map(x => x[idCol]), x => `${x}`)
     if (!ids.length) return []
-
-    const { data: rows, error: e2 } = await supabase
-      .from(targetTable)
-      .select(`${targetIdCol}, ${targetNameCol}`)
-      .in(targetIdCol, ids)
-      .limit(5000)
+    const { data: rows, error: e2 } = await supabase.from(targetTable).select(`${targetIdCol}, ${targetNameCol}`).in(targetIdCol, ids).limit(5000)
     if (e2) throw new Error(e2.message)
-
     const nameById = new Map((rows || []).map(r => [r[targetIdCol], r[targetNameCol]]))
     return ids.map(id => nameById.get(id)).filter(Boolean)
   }
@@ -226,56 +202,72 @@ async function fetchVideoDetail(video_id) {
     loadNamesByLink('video_tag', 'tag_id', 'tag', 'tag_id', 'tag_name'),
   ])
 
-  return {
-    kind: 'video',
-    video,
-    publisherName,
-    actresses,
-    actressTypes,
-    costumes,
-    scenes,
-    tags,
-  }
+  return { kind: 'video', video, publisherName, actresses, actressTypes, costumes, scenes, tags }
 }
 
 async function fetchActressDetail(actress_id) {
-  const { data: actress, error: e0 } = await supabase
-    .from('actress')
-    .select('*')
-    .eq('actress_id', actress_id)
-    .single()
+  const { data: actress, error: e0 } = await supabase.from('actress').select('*').eq('actress_id', actress_id).single()
   if (e0) throw new Error(e0.message)
-
   return { kind: 'actress', actress }
 }
 
-function openDetailModal({ title, rows, onEditClick }) {
+/** ========= Update helpers ========= */
+async function updateActress(actress_id, payload) {
+  const { error } = await supabase.from('actress').update(payload).eq('actress_id', actress_id)
+  if (error) throw new Error(error.message)
+}
+
+async function replaceVideoLinks(video_id, linkTable, idCol, ids) {
+  // delete old
+  const { error: dErr } = await supabase.from(linkTable).delete().eq('video_id', video_id)
+  if (dErr) throw new Error(dErr.message)
+
+  const cleanIds = (ids || []).filter(x => x !== null && x !== undefined)
+  if (!cleanIds.length) return
+
+  const rows = cleanIds.map(id => ({ video_id, [idCol]: id }))
+  const { error: iErr } = await supabase.from(linkTable).insert(rows)
+  if (iErr) throw new Error(iErr.message)
+}
+
+async function updateVideoAndLinks(video_id, videoPayload, linkPayloads) {
+  const { error: uErr } = await supabase.from('video').update(videoPayload).eq('video_id', video_id)
+  if (uErr) throw new Error(uErr.message)
+
+  // replace all link tables
+  await replaceVideoLinks(video_id, 'actress_in_video', 'actress_id', linkPayloads.actress_ids)
+  await replaceVideoLinks(video_id, 'actress_type_in_video', 'actress_type_id', linkPayloads.actress_type_ids)
+  await replaceVideoLinks(video_id, 'costume_in_video', 'costume_id', linkPayloads.costume_ids)
+  await replaceVideoLinks(video_id, 'video_scene', 'scene_id', linkPayloads.scene_ids)
+  await replaceVideoLinks(video_id, 'video_tag', 'tag_id', linkPayloads.tag_ids)
+}
+
+/** ========= Modal (view/edit) ========= */
+function openEntityModal({
+  kind,
+  title,
+  initialDetail, // detail object returned by fetchXXXDetail
+  onAfterSaved,  // callback to refresh list
+}) {
   const overlay = el('div', { class: 'af-modal-overlay' })
   const modal = el('div', { class: 'af-modal', role: 'dialog', 'aria-modal': 'true' })
   overlay.appendChild(modal)
 
-  const hTitle = el('div', { class: 'af-modal-title' }, [document.createTextNode(title)])
+  const statusEl = el('div', { class: 'af-status' })
+  const setStatus = (t) => (statusEl.textContent = t || '')
+
+  let editing = false
+  let detail = initialDetail
+
+  const titleEl = el('div', { class: 'af-modal-title' }, [document.createTextNode(title)])
+  const btnEdit = el('button', { class: 'af-btn', type: 'button', html: '编辑' })
   const btnClose = el('button', { class: 'af-btn', type: 'button', html: '关闭' })
-  const head = el('div', { class: 'af-modal-head' }, [hTitle, btnClose])
+  const head = el('div', { class: 'af-modal-head' }, [
+    titleEl,
+    el('div', { class: 'af-modal-actions' }, [btnEdit, btnClose]),
+  ])
 
-  const kv = el('div', { class: 'af-kv' })
-  for (const { k, v } of rows) {
-    kv.appendChild(el('div', { class: 'af-k' }, [document.createTextNode(k)]))
-    kv.appendChild(el('div', { class: 'af-v' }, [document.createTextNode(v ?? '')]))
-  }
-
-  const btnEdit = onEditClick
-    ? el('button', { class: 'af-btn', type: 'button', html: '进入编辑' })
-    : null
-
-  const foot = el('div', { class: 'af-modal-foot' })
-  if (btnEdit) foot.appendChild(btnEdit)
-  foot.appendChild(el('div', { style: 'flex:1' }))
-  foot.appendChild(btnClose)
-
-  modal.appendChild(head)
-  modal.appendChild(kv)
-  modal.appendChild(foot)
+  const body = el('div')
 
   function close() {
     overlay.remove()
@@ -286,63 +278,399 @@ function openDetailModal({ title, rows, onEditClick }) {
   }
 
   btnClose.addEventListener('click', close)
-  overlay.addEventListener('click', (e) => { if (e.target === overlay) close() })
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) close()
+  })
   document.addEventListener('keydown', onEsc)
 
-  if (btnEdit) btnEdit.addEventListener('click', () => onEditClick())
+  async function renderView() {
+    editing = false
+    btnEdit.disabled = false
+    btnEdit.textContent = '编辑'
+    setStatus('')
 
+    body.innerHTML = ''
+    const kv = el('div', { class: 'af-kv' })
+
+    if (kind === 'actress') {
+      const a = detail.actress
+      const rows = [
+        { k: '名称', v: a.actress_name ?? '' },
+        { k: '生日', v: a.date_of_birth ?? '' },
+        { k: '身高', v: a.height != null ? String(a.height) : '' },
+        { k: '罩杯', v: a.cup ?? '' },
+        { k: '个人评分', v: a.personal_rate != null ? String(a.personal_rate) : '' },
+        { k: '个人评价', v: a.personal_comment ?? '' },
+      ]
+      for (const r of rows) {
+        kv.appendChild(el('div', { class: 'af-k' }, [document.createTextNode(r.k)]))
+        kv.appendChild(el('div', { class: 'af-v' }, [document.createTextNode(r.v)]))
+      }
+    } else {
+      const v = detail.video
+      const rows = [
+        { k: '影片名称', v: v.video_name ?? '' },
+        { k: '番号', v: v.content_id ?? '' },
+        { k: '发售日期', v: v.publish_date ?? '' },
+        { k: '厂商', v: detail.publisherName ?? '' },
+        { k: '有码', v: v.censored === true ? '有码' : (v.censored === false ? '无码' : '') },
+        { k: '长度（分钟）', v: v.length != null ? String(v.length) : '' },
+
+        { k: '出演女优', v: (detail.actresses || []).join('、') },
+        { k: '女优特点', v: (detail.actressTypes || []).join('、') },
+        { k: '制服', v: (detail.costumes || []).join('、') },
+        { k: '场景', v: (detail.scenes || []).join('、') },
+        { k: '标签', v: (detail.tags || []).join('、') },
+
+        { k: '总体评分', v: v.video_personal_rate != null ? String(v.video_personal_rate) : '' },
+        { k: '女优评分', v: v.overall_actress_personal_rate != null ? String(v.overall_actress_personal_rate) : '' },
+        { k: '演技评分', v: v.personal_acting_rate != null ? String(v.personal_acting_rate) : '' },
+        { k: '声音评分', v: v.personal_voice_rate != null ? String(v.personal_voice_rate) : '' },
+
+        { k: '情节', v: v.storyline ?? '' },
+        { k: '猎奇', v: v.has_special === true ? '是' : (v.has_special === false ? '无' : '') },
+        { k: '猎奇内容', v: v.special ?? '' },
+        { k: '个人点评', v: v.personal_comment ?? '' },
+      ]
+      for (const r of rows) {
+        kv.appendChild(el('div', { class: 'af-k' }, [document.createTextNode(r.k)]))
+        kv.appendChild(el('div', { class: 'af-v' }, [document.createTextNode(r.v)]))
+      }
+    }
+
+    body.appendChild(kv)
+  }
+
+  async function renderEdit() {
+    editing = true
+    btnEdit.disabled = true
+    setStatus('')
+
+    body.innerHTML = ''
+    const form = el('div', { class: 'af-form' })
+
+    const foot = el('div', { class: 'af-foot' })
+    const btnCancel = el('button', { class: 'af-btn', type: 'button', html: '取消' })
+    const btnSave = el('button', { class: 'af-btn', type: 'button', html: '保存' })
+    foot.appendChild(btnCancel)
+    foot.appendChild(btnSave)
+
+    btnCancel.addEventListener('click', async () => {
+      await renderView()
+      btnEdit.disabled = false
+    })
+
+    if (kind === 'actress') {
+      const a = detail.actress
+
+      const fName = el('input', { class: 'af-text', type: 'text', value: a.actress_name ?? '', id: 'af-edit-actress-name', name: 'actress_name' })
+      const fDob = el('input', { class: 'af-text', type: 'date', value: a.date_of_birth ?? '', id: 'af-edit-actress-dob', name: 'date_of_birth' })
+      const fHeight = el('input', { class: 'af-text', type: 'number', value: a.height ?? '', min: '130', max: '200', id: 'af-edit-actress-height', name: 'height' })
+
+      // cup A-K
+      const cupSel = el('select', { class: 'af-text', id: 'af-edit-actress-cup', name: 'cup' })
+      cupSel.appendChild(el('option', { value: '' }, [document.createTextNode('（不填）')]))
+      for (const ch of 'ABCDEFGHIJK') {
+        cupSel.appendChild(el('option', { value: ch }, [document.createTextNode(ch)]))
+      }
+      cupSel.value = a.cup ?? ''
+
+      const fRate = el('input', { class: 'af-text', type: 'number', value: a.personal_rate ?? '', min: '0', max: '100', id: 'af-edit-actress-rate', name: 'personal_rate' })
+      const fComment = el('textarea', { class: 'af-text af-textarea', id: 'af-edit-actress-comment', name: 'personal_comment' }, [document.createTextNode(a.personal_comment ?? '')])
+
+      form.appendChild(el('div', { class: 'af-field' }, [el('div', { class: 'af-label' }, [document.createTextNode('名称（必填）')]), fName]))
+      form.appendChild(el('div', { class: 'af-row2' }, [
+        el('div', { class: 'af-field' }, [el('div', { class: 'af-label' }, [document.createTextNode('生日')]), fDob]),
+        el('div', { class: 'af-field' }, [el('div', { class: 'af-label' }, [document.createTextNode('身高（130-200）')]), fHeight]),
+      ]))
+      form.appendChild(el('div', { class: 'af-row2' }, [
+        el('div', { class: 'af-field' }, [el('div', { class: 'af-label' }, [document.createTextNode('罩杯（A-K）')]), cupSel]),
+        el('div', { class: 'af-field' }, [el('div', { class: 'af-label' }, [document.createTextNode('个人评分（0-100）')]), fRate]),
+      ]))
+      form.appendChild(el('div', { class: 'af-field' }, [el('div', { class: 'af-label' }, [document.createTextNode('个人评价')]), fComment]))
+      form.appendChild(foot)
+
+      btnSave.addEventListener('click', async () => {
+        const actress_name = norm(fName.value)
+        const date_of_birth = fDob.value || null
+        const height = fHeight.value === '' ? null : Number(fHeight.value)
+        const cup = cupSel.value || null
+        const personal_rate = fRate.value === '' ? null : Number(fRate.value)
+        const personal_comment = norm(fComment.value) || null
+
+        if (!actress_name) {
+          setStatus('名称为必填。')
+          return
+        }
+        if (height != null && (height < 130 || height > 200)) {
+          setStatus('身高需要在 130-200。')
+          return
+        }
+        if (personal_rate != null && (personal_rate < 0 || personal_rate > 100)) {
+          setStatus('个人评分需要在 0-100。')
+          return
+        }
+
+        btnSave.disabled = true
+        btnCancel.disabled = true
+        setStatus('正在保存…')
+
+        try {
+          await updateActress(a.actress_id, { actress_name, date_of_birth, height, cup, personal_rate, personal_comment })
+          setStatus('保存成功。')
+
+          // refresh detail from DB (so view mode shows latest)
+          detail = await fetchActressDetail(a.actress_id)
+          titleEl.textContent = `女优：${detail.actress.actress_name}`
+          await onAfterSaved?.()
+          await renderView()
+        } catch (e) {
+          setStatus(`保存失败：${e?.message ?? String(e)}`)
+        } finally {
+          btnSave.disabled = false
+          btnCancel.disabled = false
+          btnEdit.disabled = false
+        }
+      })
+    } else {
+      const v = detail.video
+
+      // Base fields
+      const fVideoName = el('input', { class: 'af-text', type: 'text', value: v.video_name ?? '', id: 'af-edit-video-name', name: 'video_name' })
+      const fCid = el('input', { class: 'af-text', type: 'text', value: v.content_id ?? '', id: 'af-edit-content-id', name: 'content_id' })
+      const fDate = el('input', { class: 'af-text', type: 'date', value: v.publish_date ?? '', id: 'af-edit-publish-date', name: 'publish_date' })
+
+      // censored required
+      const censSel = el('select', { class: 'af-text', id: 'af-edit-censored', name: 'censored' })
+      censSel.appendChild(el('option', { value: '' }, [document.createTextNode('请选择（必选）')]))
+      censSel.appendChild(el('option', { value: 'true' }, [document.createTextNode('有码')]))
+      censSel.appendChild(el('option', { value: 'false' }, [document.createTextNode('无码')]))
+      if (v.censored === true) censSel.value = 'true'
+      else if (v.censored === false) censSel.value = 'false'
+      else censSel.value = ''
+
+      const fLen = el('input', { class: 'af-text', type: 'number', value: v.length ?? '', min: '0', id: 'af-edit-length', name: 'length' })
+
+      // Ratings
+      const fRateAll = el('input', { class: 'af-text', type: 'number', value: v.video_personal_rate ?? '', min: '0', max: '100', id: 'af-edit-video-rate', name: 'video_personal_rate' })
+      const fRateAct = el('input', { class: 'af-text', type: 'number', value: v.overall_actress_personal_rate ?? '', min: '0', max: '100', id: 'af-edit-rate-actress', name: 'overall_actress_personal_rate' })
+      const fRateActing = el('input', { class: 'af-text', type: 'number', value: v.personal_acting_rate ?? '', min: '0', max: '100', id: 'af-edit-rate-acting', name: 'personal_acting_rate' })
+      const fRateVoice = el('input', { class: 'af-text', type: 'number', value: v.personal_voice_rate ?? '', min: '0', max: '100', id: 'af-edit-rate-voice', name: 'personal_voice_rate' })
+
+      const fStory = el('textarea', { class: 'af-text af-textarea', id: 'af-edit-storyline', name: 'storyline' }, [document.createTextNode(v.storyline ?? '')])
+
+      // has_special + special
+      const hasSel = el('select', { class: 'af-text', id: 'af-edit-has-special', name: 'has_special' })
+      hasSel.appendChild(el('option', { value: '' }, [document.createTextNode('（不填）')]))
+      hasSel.appendChild(el('option', { value: 'true' }, [document.createTextNode('是')]))
+      hasSel.appendChild(el('option', { value: 'false' }, [document.createTextNode('无')]))
+      if (v.has_special === true) hasSel.value = 'true'
+      else if (v.has_special === false) hasSel.value = 'false'
+      else hasSel.value = ''
+
+      const fSpecial = el('textarea', { class: 'af-text af-textarea', id: 'af-edit-special', name: 'special' }, [document.createTextNode(v.special ?? '')])
+      const specialWrap = el('div', { class: 'af-field' }, [
+        el('div', { class: 'af-label' }, [document.createTextNode('猎奇内容')]),
+        fSpecial,
+      ])
+
+      function syncSpecialVisibility() {
+        const on = hasSel.value === 'true'
+        specialWrap.style.display = on ? '' : 'none'
+      }
+      hasSel.addEventListener('change', syncSpecialVisibility)
+      syncSpecialVisibility()
+
+      const fComment = el('textarea', { class: 'af-text af-textarea', id: 'af-edit-video-comment', name: 'personal_comment' }, [document.createTextNode(v.personal_comment ?? '')])
+
+      // Lookup selects (reuse your dropdown component)
+      const selActress = createLookupSelect({ ...LOOKUP_PRESETS.actress })
+      const selPublisher = createLookupSelect({ ...LOOKUP_PRESETS.publisher })
+      const selScene = createLookupSelect({ ...LOOKUP_PRESETS.scene })
+      const selCostume = createLookupSelect({ ...LOOKUP_PRESETS.costume })
+      const selActressType = createLookupSelect({ ...LOOKUP_PRESETS.actress_type })
+      const selTag = createLookupSelect({ ...LOOKUP_PRESETS.tag })
+
+      // Prefill by names from detail arrays (names were loaded for view)
+      selActress.setSelectedByNames(detail.actresses || [])
+      selScene.setSelectedByNames(detail.scenes || [])
+      selCostume.setSelectedByNames(detail.costumes || [])
+      selActressType.setSelectedByNames(detail.actressTypes || [])
+      selTag.setSelectedByNames(detail.tags || [])
+      if (detail.publisherName) selPublisher.setSelectedByNames([detail.publisherName])
+
+      // Layout (similar to create)
+      form.appendChild(el('div', { class: 'af-field' }, [el('div', { class: 'af-label' }, [document.createTextNode('影片名称（必填）')]), fVideoName]))
+      form.appendChild(el('div', { class: 'af-row2' }, [
+        el('div', { class: 'af-field' }, [el('div', { class: 'af-label' }, [document.createTextNode('番号')]), fCid]),
+        el('div', { class: 'af-field' }, [el('div', { class: 'af-label' }, [document.createTextNode('发售日期')]), fDate]),
+      ]))
+
+      form.appendChild(el('div', { class: 'af-row2' }, [
+        el('div', { class: 'af-field' }, [el('div', { class: 'af-label' }, [document.createTextNode('厂商（必选）')]), selPublisher.element]),
+        el('div', { class: 'af-field' }, [el('div', { class: 'af-label' }, [document.createTextNode('有码/无码（必选）')]), censSel]),
+      ]))
+
+      form.appendChild(el('div', { class: 'af-row2' }, [
+        el('div', { class: 'af-field' }, [el('div', { class: 'af-label' }, [document.createTextNode('长度（分钟）')]), fLen]),
+        el('div', { class: 'af-field' }, [el('div', { class: 'af-label' }, [document.createTextNode('猎奇')]), hasSel]),
+      ]))
+
+      form.appendChild(specialWrap)
+
+      form.appendChild(el('div', { class: 'af-divider' }))
+
+      form.appendChild(el('div', { class: 'af-row2' }, [
+        el('div', { class: 'af-field' }, [el('div', { class: 'af-label' }, [document.createTextNode('出演女优')]), selActress.element]),
+        el('div', { class: 'af-field' }, [el('div', { class: 'af-label' }, [document.createTextNode('女优特点')]), selActressType.element]),
+      ]))
+      form.appendChild(el('div', { class: 'af-row2' }, [
+        el('div', { class: 'af-field' }, [el('div', { class: 'af-label' }, [document.createTextNode('制服')]), selCostume.element]),
+        el('div', { class: 'af-field' }, [el('div', { class: 'af-label' }, [document.createTextNode('场景')]), selScene.element]),
+      ]))
+      form.appendChild(el('div', { class: 'af-field' }, [el('div', { class: 'af-label' }, [document.createTextNode('标签')]), selTag.element]))
+
+      form.appendChild(el('div', { class: 'af-divider' }))
+
+      form.appendChild(el('div', { class: 'af-row2' }, [
+        el('div', { class: 'af-field' }, [el('div', { class: 'af-label' }, [document.createTextNode('总体评分（0-100）')]), fRateAll]),
+        el('div', { class: 'af-field' }, [el('div', { class: 'af-label' }, [document.createTextNode('女优评分（0-100）')]), fRateAct]),
+      ]))
+      form.appendChild(el('div', { class: 'af-row2' }, [
+        el('div', { class: 'af-field' }, [el('div', { class: 'af-label' }, [document.createTextNode('演技评分（0-100）')]), fRateActing]),
+        el('div', { class: 'af-field' }, [el('div', { class: 'af-label' }, [document.createTextNode('声音评分（0-100）')]), fRateVoice]),
+      ]))
+
+      form.appendChild(el('div', { class: 'af-field' }, [el('div', { class: 'af-label' }, [document.createTextNode('情节')]), fStory]))
+      form.appendChild(el('div', { class: 'af-field' }, [el('div', { class: 'af-label' }, [document.createTextNode('个人点评')]), fComment]))
+      form.appendChild(el('div', { class: 'af-note' }, [document.createTextNode('保存策略：先 UPDATE video，再删除该 video_id 的所有关联表记录，然后按当前选择重新 INSERT。')]))
+      form.appendChild(foot)
+
+      btnSave.addEventListener('click', async () => {
+        const video_name = norm(fVideoName.value)
+        if (!video_name) {
+          setStatus('影片名称为必填。')
+          return
+        }
+
+        // required: publisher, censored
+        const pubSel = selPublisher.getSelected()
+        if (!pubSel.length) {
+          setStatus('厂商为必选。')
+          return
+        }
+        const publisher_id = pubSel[0].id
+
+        if (censSel.value !== 'true' && censSel.value !== 'false') {
+          setStatus('有码/无码为必选。')
+          return
+        }
+        const censored = censSel.value === 'true'
+
+        const content_id = norm(fCid.value) || null
+        const publish_date = fDate.value || null
+        const length = fLen.value === '' ? null : Number(fLen.value)
+
+        const video_personal_rate = fRateAll.value === '' ? null : Number(fRateAll.value)
+        const overall_actress_personal_rate = fRateAct.value === '' ? null : Number(fRateAct.value)
+        const personal_acting_rate = fRateActing.value === '' ? null : Number(fRateActing.value)
+        const personal_voice_rate = fRateVoice.value === '' ? null : Number(fRateVoice.value)
+
+        for (const [label, val] of [
+          ['总体评分', video_personal_rate],
+          ['女优评分', overall_actress_personal_rate],
+          ['演技评分', personal_acting_rate],
+          ['声音评分', personal_voice_rate],
+        ]) {
+          if (val != null && (val < 0 || val > 100)) {
+            setStatus(`${label} 需要在 0-100。`)
+            return
+          }
+        }
+
+        const storyline = norm(fStory.value) || null
+        const has_special = hasSel.value === '' ? null : (hasSel.value === 'true')
+        let special = norm(fSpecial.value) || null
+        if (has_special !== true) special = null // 无猎奇则清空内容
+        const personal_comment = norm(fComment.value) || null
+
+        // link ids
+        const actress_ids = selActress.getSelected().map(x => x.id)
+        const actress_type_ids = selActressType.getSelected().map(x => x.id)
+        const costume_ids = selCostume.getSelected().map(x => x.id)
+        const scene_ids = selScene.getSelected().map(x => x.id)
+        const tag_ids = selTag.getSelected().map(x => x.id)
+
+        const videoPayload = {
+          video_name,
+          content_id,
+          publish_date,
+          publisher_id,
+          censored,
+          length,
+          video_personal_rate,
+          overall_actress_personal_rate,
+          personal_acting_rate,
+          personal_voice_rate,
+          storyline,
+          has_special,
+          special,
+          personal_comment,
+        }
+
+        btnSave.disabled = true
+        btnCancel.disabled = true
+        setStatus('正在保存…')
+
+        try {
+          await updateVideoAndLinks(v.video_id, videoPayload, {
+            actress_ids,
+            actress_type_ids,
+            costume_ids,
+            scene_ids,
+            tag_ids,
+          })
+
+          setStatus('保存成功。')
+
+          // refresh detail for view mode
+          detail = await fetchVideoDetail(v.video_id)
+          titleEl.textContent = `影片：${detail.video.video_name}`
+          await onAfterSaved?.()
+          await renderView()
+        } catch (e) {
+          setStatus(`保存失败：${e?.message ?? String(e)}`)
+        } finally {
+          btnSave.disabled = false
+          btnCancel.disabled = false
+          btnEdit.disabled = false
+        }
+      })
+    }
+
+    body.appendChild(form)
+  }
+
+  btnEdit.addEventListener('click', async () => {
+    btnEdit.disabled = true
+    btnClose.disabled = true
+    try {
+      await renderEdit()
+    } finally {
+      btnClose.disabled = false
+    }
+  })
+
+  modal.appendChild(head)
+  modal.appendChild(body)
+  modal.appendChild(statusEl)
   document.body.appendChild(overlay)
+
+  renderView()
 }
 
-function videoDetailRows(d) {
-  const v = d.video
-  return [
-    { k: '影片名称', v: v.video_name ?? '' },
-    { k: '番号', v: v.content_id ?? '' },
-    { k: '发售日期', v: v.publish_date ?? '' },
-    { k: '厂商', v: d.publisherName ?? '' },
-    { k: '有码', v: v.censored === true ? '有码' : (v.censored === false ? '无码' : '') },
-    { k: '长度（分钟）', v: v.length != null ? String(v.length) : '' },
-
-    { k: '出演女优', v: (d.actresses || []).join('、') },
-    { k: '女优特点', v: (d.actressTypes || []).join('、') },
-    { k: '制服', v: (d.costumes || []).join('、') },
-    { k: '场景', v: (d.scenes || []).join('、') },
-    { k: '标签', v: (d.tags || []).join('、') },
-
-    { k: '总体评分', v: v.video_personal_rate != null ? String(v.video_personal_rate) : '' },
-    { k: '女优评分', v: v.overall_actress_personal_rate != null ? String(v.overall_actress_personal_rate) : '' },
-    { k: '演技评分', v: v.personal_acting_rate != null ? String(v.personal_acting_rate) : '' },
-    { k: '声音评分', v: v.personal_voice_rate != null ? String(v.personal_voice_rate) : '' },
-
-    { k: '情节', v: v.storyline ?? '' },
-    { k: '猎奇', v: v.has_special === true ? '是' : (v.has_special === false ? '无' : '') },
-    { k: '猎奇内容', v: v.special ?? '' },
-    { k: '个人点评', v: v.personal_comment ?? '' },
-  ]
-}
-
-function actressDetailRows(d) {
-  const a = d.actress
-  return [
-    { k: '名称', v: a.actress_name ?? '' },
-    { k: '生日', v: a.date_of_birth ?? '' },
-    { k: '身高', v: a.height != null ? String(a.height) : '' },
-    { k: '罩杯', v: a.cup ?? '' },
-    { k: '个人评分', v: a.personal_rate != null ? String(a.personal_rate) : '' },
-    { k: '个人评价', v: a.personal_comment ?? '' },
-  ]
-}
-
-function labelMatchedBy(m) {
-  if (m === 'video_name') return '影片名'
-  if (m === 'content_id') return '番号'
-  if (m === 'actress_link') return '女优关联'
-  return '匹配'
-}
-
-/** ====== 渲染：豆腐块 ====== */
-function renderResults(mount, state) {
+/** ========= Results grid ========= */
+function renderResults(mount, state, openModalFor) {
   mount.innerHTML = ''
 
   if (state.error) {
@@ -361,57 +689,24 @@ function renderResults(mount, state) {
   for (const a of state.actresses || []) {
     const card = el('div', { class: 'af-card' })
     card.appendChild(el('div', { class: 'af-card-title' }, [document.createTextNode(a.actress_name)]))
-    card.appendChild(el('div', { class: 'af-card-sub' }, [document.createTextNode('女优')]))
-    card.addEventListener('click', async () => {
-      try {
-        const d = await fetchActressDetail(a.actress_id)
-        openDetailModal({
-          title: `女优：${a.actress_name}`,
-          rows: actressDetailRows(d),
-          onEditClick: () => {
-            // 后续：这里接 actress-edit 的入口
-            alert('TODO：接入女优编辑功能（actress-edit.js）')
-          },
-        })
-      } catch (e) {
-        alert(`加载详情失败：${e?.message ?? String(e)}`)
-      }
-    })
+    card.appendChild(el('div', { class: 'af-card-sub' }, [document.createTextNode('')]))
+    card.addEventListener('click', async () => openModalFor('actress', a))
     grid.appendChild(card)
   }
 
   // video cards
   for (const v of state.videos || []) {
     const meta = state.videoMetaById?.get(v.video_id) || { actresses: [] }
-    const actressesText = (meta.actresses || []).slice(0, 8).join('、') // 卡片别太长
+    const actressesText = (meta.actresses || []).slice(0, 10).join('、')
     const sub = [
       v.content_id ? `番号：${v.content_id}` : '番号：',
       actressesText ? `女优：${actressesText}` : '女优：',
     ].join('\n')
 
     const card = el('div', { class: 'af-card' })
-    card.appendChild(el('div', { class: 'af-card-title' }, [
-      document.createTextNode(v.video_name),
-      el('span', { class: 'af-chip' }, [document.createTextNode(labelMatchedBy(v.matched_by))]),
-    ]))
+    card.appendChild(el('div', { class: 'af-card-title' }, [document.createTextNode(v.video_name)]))
     card.appendChild(el('div', { class: 'af-card-sub' }, [document.createTextNode(sub)]))
-
-    card.addEventListener('click', async () => {
-      try {
-        const d = await fetchVideoDetail(v.video_id)
-        openDetailModal({
-          title: `影片：${v.video_name}`,
-          rows: videoDetailRows(d),
-          onEditClick: () => {
-            // 后续：这里接 video-edit 的入口
-            alert('TODO：接入影片编辑功能（video-edit.js）')
-          },
-        })
-      } catch (e) {
-        alert(`加载详情失败：${e?.message ?? String(e)}`)
-      }
-    })
-
+    card.addEventListener('click', async () => openModalFor('video', v))
     grid.appendChild(card)
   }
 
@@ -423,7 +718,7 @@ function renderResults(mount, state) {
   mount.appendChild(grid)
 }
 
-/** ====== 对外：挂载页面 ====== */
+/** ========= Public mount ========= */
 export function mountSearchEditPage({ containerId = 'app' } = {}) {
   ensureStyles()
   const host = document.getElementById(containerId)
@@ -432,9 +727,18 @@ export function mountSearchEditPage({ containerId = 'app' } = {}) {
   host.innerHTML = ''
   const page = el('div', { class: 'af-page' })
 
-  const input = el('input', { class: 'af-input', type: 'text', placeholder: '输入影片名 / 番号 / 女优名…', autocomplete: 'off' })
+  const input = el('input', {
+    class: 'af-input',
+    type: 'text',
+    placeholder: '输入影片名 / 番号 / 女优名…',
+    autocomplete: 'off',
+    id: `${containerId}-q`,
+    name: `${containerId}-q`,
+  })
   const btn = el('button', { class: 'af-btn', type: 'button', html: '检索' })
-  const hint = el('div', { class: 'af-hint' }, [document.createTextNode('检索：影片名、番号、女优名（并返回该女优出演影片）。点击卡片可查看详情（可扩展到编辑）。')])
+  const hint = el('div', { class: 'af-hint' }, [
+    document.createTextNode('检索：影片名、番号、女优名（并返回该女优出演影片）。点击结果查看详情；详情右上角可编辑并保存。'),
+  ])
   const resultMount = el('div')
 
   page.appendChild(el('div', { class: 'af-bar' }, [input, btn]))
@@ -442,21 +746,50 @@ export function mountSearchEditPage({ containerId = 'app' } = {}) {
   page.appendChild(resultMount)
   host.appendChild(page)
 
+  let lastQuery = ''
   let lastState = { query: '', actresses: [], videos: [], videoMetaById: new Map(), error: null }
-  renderResults(resultMount, lastState)
+  renderResults(resultMount, lastState, async () => {})
 
-  async function run() {
-    const q = norm(input.value)
+  async function refresh() {
     btn.disabled = true
     try {
-      const data = await runSearch(q)
+      const data = await runSearch(lastQuery)
       lastState = { ...data, error: null }
-      renderResults(resultMount, lastState)
+      renderResults(resultMount, lastState, openModalFor)
     } catch (e) {
-      lastState = { query: q, actresses: [], videos: [], videoMetaById: new Map(), error: e?.message ?? String(e) }
-      renderResults(resultMount, lastState)
+      lastState = { query: lastQuery, actresses: [], videos: [], videoMetaById: new Map(), error: e?.message ?? String(e) }
+      renderResults(resultMount, lastState, openModalFor)
     } finally {
       btn.disabled = false
+    }
+  }
+
+  async function run() {
+    lastQuery = norm(input.value)
+    await refresh()
+  }
+
+  async function openModalFor(kind, row) {
+    try {
+      if (kind === 'actress') {
+        const detail = await fetchActressDetail(row.actress_id)
+        openEntityModal({
+          kind: 'actress',
+          title: `女优：${detail.actress.actress_name}`,
+          initialDetail: detail,
+          onAfterSaved: refresh,
+        })
+      } else {
+        const detail = await fetchVideoDetail(row.video_id)
+        openEntityModal({
+          kind: 'video',
+          title: `影片：${detail.video.video_name}`,
+          initialDetail: detail,
+          onAfterSaved: refresh,
+        })
+      }
+    } catch (e) {
+      alert(`加载详情失败：${e?.message ?? String(e)}`)
     }
   }
 
@@ -467,4 +800,7 @@ export function mountSearchEditPage({ containerId = 'app' } = {}) {
       run()
     }
   })
+
+  // initial
+  renderResults(resultMount, lastState, openModalFor)
 }
