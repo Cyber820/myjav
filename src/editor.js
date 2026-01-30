@@ -1,8 +1,7 @@
 // src/editor.js
-//test
-import { supabase } from './supabaseClient.js'
-import { renderTopBar } from './editorShell.js'
+import { requireSession, renderTopBar } from './editorShell.js'
 import { openActressCreateModal } from './actress-create.js'
+import { openMetaCreateModal } from './meta-create.js'
 
 function makeButton(label, { onClick, disabled = false } = {}) {
   const btn = document.createElement('button')
@@ -27,14 +26,6 @@ function mountLayout(app) {
   root.style.display = 'flex'
   root.style.flexDirection = 'column'
 
-  const debug = document.createElement('div')
-  debug.style.borderBottom = '1px solid rgba(0,0,0,.15)'
-  debug.style.padding = '12px'
-  debug.style.fontFamily = 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace'
-  debug.style.fontSize = '12px'
-  debug.style.whiteSpace = 'pre-wrap'
-  debug.style.background = 'rgba(0,0,0,.03)'
-
   const main = document.createElement('div')
   main.style.flex = '1'
   main.style.display = 'flex'
@@ -51,87 +42,53 @@ function mountLayout(app) {
   info.style.padding = '0 12px 12px'
   info.style.fontSize = '12px'
   info.style.color = 'rgba(0,0,0,.65)'
-  info.textContent = '提示：点击「录入女优」会弹出输入框。'
+  info.textContent = '提示：录入成功后会出现“确定”，点击后回到录入页面继续录入。'
 
   main.appendChild(panel)
   main.appendChild(info)
 
-  root.appendChild(debug)
   root.appendChild(main)
   app.appendChild(root)
 
-  return { debug, panel, info, root }
-}
-
-function fmtSession(session) {
-  if (!session) return 'session: null (未登录)'
-  return [
-    `session: OK (已登录)`,
-    `user.id: ${session.user?.id ?? ''}`,
-    `user.email: ${session.user?.email ?? ''}`,
-    `access_token: ${session.access_token ? '[present]' : '[missing]'}`,
-    `expires_at: ${session.expires_at ?? ''}`,
-  ].join('\n')
-}
-
-function fmtEventLine(event, session) {
-  const email = session?.user?.email ?? ''
-  return `[auth event] ${event}${email ? ` (${email})` : ''}`
+  return { root, panel, info }
 }
 
 async function main() {
   const app = document.getElementById('app')
   if (!app) throw new Error('Missing #app container')
 
-  const { debug, panel, info, root } = mountLayout(app)
+  const session = await requireSession()
+  const { root, panel, info } = mountLayout(app)
 
-  // 1) 初始 session
-  const { data: { session }, error: sessErr } = await supabase.auth.getSession()
-  debug.textContent =
-    `Supabase getSession():\n` +
-    (sessErr ? `ERROR: ${sessErr.message}\n\n` : '') +
-    fmtSession(session) +
-    `\n\n提示：如果这里一直显示 null，说明当前浏览器没有 session，先去 index.html 登录。`
+  const { topbar } = renderTopBar({ session })
+  root.insertBefore(topbar, root.firstChild)
 
-  // 2) 监听 auth 事件
-  const { data: sub } = supabase.auth.onAuthStateChange((event, session2) => {
-    debug.textContent =
-      `Supabase getSession():\n` +
-      fmtSession(session2) +
-      `\n\n` +
-      fmtEventLine(event, session2)
-  })
-
-  // 3) 顶部栏（只有已登录才渲染，避免你误以为“没输入框”）
-  if (session) {
-    const { topbar } = renderTopBar({ session })
-    root.insertBefore(topbar, root.firstChild) // 放在 debug 面板上方
-  } else {
-    // 未登录时给一个按钮方便你跳回去
-    const btnGoLogin = makeButton('去登录页（index.html）', {
-      onClick: () => (window.location.href = '/index.html')
-    })
-    panel.appendChild(btnGoLogin)
-  }
-
-  // 4) 功能按钮：已登录才可用
   const btnCreateActress = makeButton('录入女优', {
-    disabled: !session,
     onClick: () => {
       openActressCreateModal({
         onCreated: (row) => {
           info.textContent = `已创建女优：${row?.actress_name ?? '(unknown)'}（ID: ${row?.actress_id ?? ''}）`
-        }
+        },
       })
-    }
+    },
   })
+
+  const btnCreateVideo = makeButton('录入影片（待做）', { disabled: true })
+
+  const btnCreateMeta = makeButton('录入其他信息', {
+    onClick: () => openMetaCreateModal(),
+  })
+
+  const btnEditActress = makeButton('编辑/修改女优（待做）', { disabled: true })
+  const btnEditVideo = makeButton('编辑/修改影片（待做）', { disabled: true })
+  const btnSearch = makeButton('搜索与呈现（待做）', { disabled: true })
 
   panel.appendChild(btnCreateActress)
-
-  // 5) 防止热更新/重载时重复订阅（可选）
-  window.addEventListener('beforeunload', () => {
-    try { sub?.subscription?.unsubscribe?.() } catch {}
-  })
+  panel.appendChild(btnCreateVideo)
+  panel.appendChild(btnCreateMeta)
+  panel.appendChild(btnEditActress)
+  panel.appendChild(btnEditVideo)
+  panel.appendChild(btnSearch)
 }
 
 main().catch((err) => {
