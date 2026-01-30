@@ -76,17 +76,18 @@ function validate(form, { publisherSel, actressSel, actressTypeSel, costumeSel, 
   }
 
   // publisher 单选
-  const publisherPicked = publisherSel.getSelected()[0] || null
-  const publisher_id = publisherPicked ? publisherPicked.id : null
-  // 你没说必填，这里先允许空；如果你希望必填就打开下面两行
-  // if (!publisher_id) errors.push('厂商必选。')
+const publisherPicked = publisherSel.getSelected()[0] || null
+const publisher_id = publisherPicked ? publisherPicked.id : null
+if (!publisher_id) errors.push('厂商（publisher）必选。')
+
 
   // censored boolean：有/无
-  const censoredVal = norm(form.censored.value)
-  let censored = null
-  if (censoredVal === 'true') censored = true
-  else if (censoredVal === 'false') censored = false
-  else censored = null // 未选允许空；若要必填，errors.push(...)
+const censoredVal = norm(form.censored.value)
+let censored = null
+if (censoredVal === 'true') censored = true
+else if (censoredVal === 'false') censored = false
+else errors.push('有码（censored）必选：请选择“有码”或“无码”。')
+
 
   const length = toIntOrNull(form.length.value)
   if (Number.isNaN(length)) errors.push('长度（分钟）必须是数字。')
