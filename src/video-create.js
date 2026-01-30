@@ -94,6 +94,10 @@ function validate(form, { publisherSel, actressSel, actressTypeSel, costumeSel, 
   if (length !== null && length < 0) errors.push('长度（分钟）不能为负数。')
 
   const video_personal_rate = validateRate('总体评分', form.video_personal_rate.value, errors)
+
+  // 新增：XXX评分（写入 personal_sex_rate）
+  const personal_sex_rate = validateRate('XXX评分', form.personal_sex_rate.value, errors)
+
   const overall_actress_personal_rate = validateRate('女优评分', form.overall_actress_personal_rate.value, errors)
   const personal_acting_rate = validateRate('演技评分', form.personal_acting_rate.value, errors)
   const personal_voice_rate = validateRate('声音评分', form.personal_voice_rate.value, errors)
@@ -127,6 +131,7 @@ function validate(form, { publisherSel, actressSel, actressTypeSel, costumeSel, 
         censored,
         length,
         video_personal_rate,
+        personal_sex_rate, // ✅ 新增写入列
         overall_actress_personal_rate,
         personal_acting_rate,
         personal_voice_rate,
@@ -270,6 +275,10 @@ export function openVideoCreateModal({ onCreated } = {}) {
     el('div', { class: 'af-grid' }, [
       el('div', { class: 'af-label' }, [document.createTextNode('总体评分（0-100）')]),
       el('input', { class: 'af-input', name: 'video_personal_rate', type: 'number', min: '0', max: '100', step: '1', placeholder: '可选' }),
+
+      // ✅ 新增：XXX评分（0-100）
+      el('div', { class: 'af-label' }, [document.createTextNode('XXX评分（0-100）')]),
+      el('input', { class: 'af-input', name: 'personal_sex_rate', type: 'number', min: '0', max: '100', step: '1', placeholder: '可选' }),
 
       el('div', { class: 'af-label' }, [document.createTextNode('女优评分（0-100）')]),
       el('input', { class: 'af-input', name: 'overall_actress_personal_rate', type: 'number', min: '0', max: '100', step: '1', placeholder: '可选' }),
