@@ -1,115 +1,209 @@
 // src/editor.js
-import { requireSession, renderTopBar } from './editorShell.js'
+import { supabase } from './supabaseClient.js'
+
+// 录入功能（你已有）
 import { openActressCreateModal } from './actress-create.js'
 import { openMetaCreateModal } from './meta-create.js'
 import { openVideoCreateModal } from './video-create.js'
 
+// 搜索（本次接入）
+import { mountSearchEditPage } from './search/search-edit.js'
 
-function makeButton(label, { onClick, disabled = false } = {}) {
-  const btn = document.createElement('button')
-  btn.type = 'button'
-  btn.textContent = label
-  btn.disabled = disabled
-  btn.style.padding = '8px 12px'
-  btn.style.borderRadius = '10px'
-  btn.style.border = '1px solid rgba(0,0,0,.25)'
-  btn.style.background = disabled ? 'rgba(0,0,0,.04)' : '#fff'
-  btn.style.cursor = disabled ? 'not-allowed' : 'pointer'
-  btn.style.opacity = disabled ? '0.6' : '1'
-  if (typeof onClick === 'function' && !disabled) btn.addEventListener('click', onClick)
-  return btn
+function el(tag, attrs = {}, children = []) {
+  const node = document.createElement(tag)
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === 'class') node.className = v
+    else if (k === 'html') node.innerHTML = v
+    else if (k.startsWith('on') && typeof v === 'function') node.addEventListener(k.slice(2).toLowerCase(), v)
+    else if (v === null || v === undefined) continue
+    else node.setAttribute(k, v)
+  }
+  for (const c of children) node.appendChild(c)
+  return node
 }
 
-function mountLayout(app) {
-  app.innerHTML = ''
-
-  const root = document.createElement('div')
-  root.style.minHeight = '100vh'
-  root.style.display = 'flex'
-  root.style.flexDirection = 'column'
-
-  const main = document.createElement('div')
-  main.style.flex = '1'
-  main.style.display = 'flex'
-  main.style.flexDirection = 'column'
-
-  const panel = document.createElement('div')
-  panel.style.padding = '12px'
-  panel.style.display = 'flex'
-  panel.style.gap = '10px'
-  panel.style.flexWrap = 'wrap'
-  panel.style.alignItems = 'center'
-
-  const info = document.createElement('div')
-  info.style.padding = '0 12px 12px'
-  info.style.fontSize = '12px'
-  info.style.color = 'rgba(0,0,0,.65)'
-  info.textContent = '提示：录入成功后会出现“确定”，点击后回到录入页面继续录入。'
-
-  main.appendChild(panel)
-  main.appendChild(info)
-
-  root.appendChild(main)
-  app.appendChild(root)
-
-  return { root, panel, info }
+function ensureStyles() {
+  if (document.getElementById('af-editor-style')) return
+  const style = el('style', {
+    id: 'af-editor-style',
+    html: `
+      .af-page{padding:14px;max-width:1100px;margin:0 auto;}
+      .af-top{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap;}
+      .af-title{font-size:18px;font-weight:800;}
+      .af-sub{margin-top:4px;font-size:12px;color:rgba(0,0,0,.65);white-space:pre-wrap;}
+      .af-card{margin-top:12px;border:1px solid rgba(0,0,0,.12);border-radius:12px;padding:12px;background:#fff;}
+      .af-row{display:flex;gap:10px;flex-wrap:wrap;align-items:center;}
+      .af-btn{border:1px solid rgba(0,0,0,.25);background:#fff;border-radius:10px;padding:10px 14px;cursor:pointer;}
+      .af-btn:disabled{opacity:.6;cursor:not-allowed;}
+      .af-input{width:min(360px,100%);box-sizing:border-box;border:1px solid rgba(0,0,0,.25);border-radius:10px;padding:10px 12px;font-size:14px;}
+      .af-muted{font-size:12px;color:rgba(0,0,0,.65);}
+      .af-status{margin-top:8px;font-size:12px;color:rgba(0,0,0,.65);white-space:pre-wrap;}
+      .af-divider{height:1px;background:rgba(0,0,0,.08);margin:12px 0;}
+    `,
+  })
+  document.head.appendChild(style)
 }
 
-async function main() {
-  const app = document.getElementById('app')
-  if (!app) throw new Error('Missing #app container')
+function norm(s) {
+  return (s ?? '').toString().trim()
+}
 
-  const session = await requireSession()
-  const { root, panel, info } = mountLayout(app)
+/** ===== Auth UI ===== */
+function renderLoginCard({ host, setStatus }) {
+  const email = el('input', { class: 'af-input', type: 'email', placeholder: '输入邮箱以获取登录链接', autocomplete: 'email' })
+  const btn = el('button', { class: 'af-btn', type: 'button', html: '发送登录邮件' })
 
-  const { topbar } = renderTopBar({ session })
-  root.insertBefore(topbar, root.firstChild)
-
-  const btnCreateActress = makeButton('录入女优', {
-    onClick: () => {
-      openActressCreateModal({
-        onCreated: (row) => {
-          info.textContent = `已创建女优：${row?.actress_name ?? '(unknown)'}（ID: ${row?.actress_id ?? ''}）`
+  btn.addEventListener('click', async () => {
+    const addr = norm(email.value)
+    if (!addr) {
+      setStatus('请输入邮箱。')
+      return
+    }
+    btn.disabled = true
+    setStatus('正在发送登录邮件…')
+    try {
+      // 注意：你之前已跑通 auth-callback.html 的 flow；
+      // 这里仅负责发邮件，回调页由你的 Supabase 配置决定。
+      const { error } = await supabase.auth.signInWithOtp({
+        email: addr,
+        options: {
+          emailRedirectTo: `${window.location.origin}/auth-callback.html`,
         },
       })
-    },
+      if (error) throw error
+      setStatus('已发送登录邮件：请打开邮箱点击链接完成登录。')
+    } catch (e) {
+      setStatus(`发送失败：${e?.message ?? String(e)}`)
+    } finally {
+      btn.disabled = false
+    }
   })
 
- const btnCreateVideo = makeButton('录入影片', {
-  onClick: () => openVideoCreateModal({
-    onCreated: (row) => {
-      // 可选：给用户一个提示
-      // info.textContent = `已创建影片：${row?.video_name ?? ''}（ID: ${row?.video_id ?? ''}）`
-    },
-  }),
-})
-
-
-  const btnCreateMeta = makeButton('录入其他信息', {
-    onClick: () => openMetaCreateModal(),
-  })
-
-  const btnEditActress = makeButton('编辑/修改女优（待做）', { disabled: true })
-  const btnEditVideo = makeButton('编辑/修改影片（待做）', { disabled: true })
-  const btnSearch = makeButton('搜索与呈现（待做）', { disabled: true })
-
-  panel.appendChild(btnCreateActress)
-  panel.appendChild(btnCreateVideo)
-  panel.appendChild(btnCreateMeta)
-  panel.appendChild(btnEditActress)
-  panel.appendChild(btnEditVideo)
-  panel.appendChild(btnSearch)
+  host.appendChild(el('div', { class: 'af-card' }, [
+    el('div', { class: 'af-row' }, [email, btn]),
+    el('div', { class: 'af-muted', style: 'margin-top:8px;' }, [
+      document.createTextNode('提示：登录成功后会自动返回本页并显示录入与检索功能。'),
+    ]),
+  ]))
 }
 
-main().catch((err) => {
-  console.error(err)
-  const app = document.getElementById('app')
-  if (app) {
-    app.innerHTML = `
-      <div style="padding:16px;font-family:system-ui;">
-        <div style="font-weight:700;margin-bottom:8px;">Editor 启动失败</div>
-        <pre style="white-space:pre-wrap;border:1px solid rgba(0,0,0,.15);padding:12px;border-radius:10px;background:rgba(0,0,0,.03);">${String(err?.message ?? err)}</pre>
-      </div>
-    `
+function renderAuthedUI({ host, user, setStatus }) {
+  // 顶部：三大录入按钮（左侧），右侧占位按钮已删除（按你需求）
+  const btnActress = el('button', { class: 'af-btn', type: 'button', html: '录入女优' })
+  const btnVideo = el('button', { class: 'af-btn', type: 'button', html: '录入影片' })
+  const btnMeta = el('button', { class: 'af-btn', type: 'button', html: '录入其他信息' })
+
+  btnActress.addEventListener('click', () => openActressCreateModal())
+  btnVideo.addEventListener('click', () => openVideoCreateModal())
+  btnMeta.addEventListener('click', () => openMetaCreateModal())
+
+  const btnSignOut = el('button', { class: 'af-btn', type: 'button', html: '退出登录' })
+  btnSignOut.addEventListener('click', async () => {
+    btnSignOut.disabled = true
+    setStatus('正在退出…')
+    try {
+      const { error } = await supabase.auth.signOut()
+      if (error) throw error
+      setStatus('已退出。')
+    } catch (e) {
+      setStatus(`退出失败：${e?.message ?? String(e)}`)
+      btnSignOut.disabled = false
+    }
+  })
+
+  const header = el('div', { class: 'af-top' }, [
+    el('div', {}, [
+      el('div', { class: 'af-title' }, [document.createTextNode('MyJAV Editor')]),
+      el('div', { class: 'af-sub' }, [
+        document.createTextNode(`登录用户：${user?.email ?? '(unknown)'}\n（编辑功能将通过搜索结果详情弹窗进入）`),
+      ]),
+    ]),
+    el('div', { class: 'af-row' }, [btnSignOut]),
+  ])
+
+  const entryCard = el('div', { class: 'af-card' }, [
+    el('div', { class: 'af-row' }, [btnActress, btnVideo, btnMeta]),
+    el('div', { class: 'af-muted', style: 'margin-top:8px;' }, [
+      document.createTextNode('录入完成后，可在下方搜索并点击结果查看详情（后续从详情进入修改）。'),
+    ]),
+  ])
+
+  // 搜索区容器：放在录入按钮下方
+  const searchCard = el('div', { class: 'af-card' }, [
+    el('div', { class: 'af-muted' }, [document.createTextNode('检索')]),
+    el('div', { class: 'af-divider' }),
+    el('div', { id: 'af-search-host' }), // search-edit.js 会把这个容器当成“页面根”
+  ])
+
+  host.appendChild(header)
+  host.appendChild(entryCard)
+  host.appendChild(searchCard)
+
+  // mount search
+  // search-edit.js 会自行渲染输入框/按钮/结果网格/弹窗
+  mountSearchEditPage({ containerId: 'af-search-host' })
+}
+
+/** ===== Main ===== */
+async function main() {
+  ensureStyles()
+
+  const host = document.getElementById('app')
+  if (!host) throw new Error('Missing #app')
+
+  host.innerHTML = ''
+  const page = el('div', { class: 'af-page' })
+  host.appendChild(page)
+
+  const statusEl = el('div', { class: 'af-status' })
+  function setStatus(text) {
+    statusEl.textContent = text || ''
   }
+
+  // 初始：显示标题（未登录也显示）
+  page.appendChild(el('div', { class: 'af-top' }, [
+    el('div', {}, [
+      el('div', { class: 'af-title' }, [document.createTextNode('MyJAV Editor')]),
+      el('div', { class: 'af-sub' }, [document.createTextNode('加载登录状态…')]),
+    ]),
+  ]))
+  page.appendChild(statusEl)
+
+  // 获取 session
+  const { data, error } = await supabase.auth.getSession()
+  if (error) setStatus(`getSession 失败：${error.message}`)
+
+  function rerender(session) {
+    // 清空除 status 以外全部重建
+    page.innerHTML = ''
+    page.appendChild(statusEl)
+
+    if (!session?.user) {
+      // 未登录
+      page.insertBefore(el('div', { class: 'af-top' }, [
+        el('div', {}, [
+          el('div', { class: 'af-title' }, [document.createTextNode('MyJAV Editor')]),
+          el('div', { class: 'af-sub' }, [document.createTextNode('请先登录。')]),
+        ]),
+      ]), statusEl)
+
+      renderLoginCard({ host: page, setStatus })
+    } else {
+      // 已登录
+      renderAuthedUI({ host: page, user: session.user, setStatus })
+    }
+  }
+
+  rerender(data?.session)
+
+  // 监听登录态变化（并输出状态码/事件，便于你 debug）
+  supabase.auth.onAuthStateChange((event, session) => {
+    setStatus(`Auth event: ${event}\nHas session: ${!!session}\nUser: ${session?.user?.email ?? ''}`)
+    rerender(session)
+  })
+}
+
+main().catch((e) => {
+  const host = document.getElementById('app')
+  if (host) host.textContent = `Fatal: ${e?.message ?? String(e)}`
 })
