@@ -2,6 +2,8 @@
 import { requireSession, renderTopBar } from './editorShell.js'
 import { openActressCreateModal } from './actress-create.js'
 import { openMetaCreateModal } from './meta-create.js'
+import { openVideoCreateModal } from './video-create.js'
+
 
 function makeButton(label, { onClick, disabled = false } = {}) {
   const btn = document.createElement('button')
@@ -73,7 +75,15 @@ async function main() {
     },
   })
 
-  const btnCreateVideo = makeButton('录入影片（待做）', { disabled: true })
+ const btnCreateVideo = makeButton('录入影片', {
+  onClick: () => openVideoCreateModal({
+    onCreated: (row) => {
+      // 可选：给用户一个提示
+      // info.textContent = `已创建影片：${row?.video_name ?? ''}（ID: ${row?.video_id ?? ''}）`
+    },
+  }),
+})
+
 
   const btnCreateMeta = makeButton('录入其他信息', {
     onClick: () => openMetaCreateModal(),
