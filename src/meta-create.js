@@ -1,18 +1,13 @@
 // src/meta-create.js
 import { supabase } from './supabaseClient.js'
+import { createSubmitStatus } from './ui/submit-status.js'
 
-/**
- * 你 schema 的 5 个“只有 id + name”的表映射
- * - key: 下拉显示用
- * - table: Supabase table name
- * - col:  写入的 name 列
- */
 const META_TYPES = [
   { key: '女优类型', table: 'actress_type', col: 'actress_type_name' },
-  { key: '厂商',     table: 'publisher',    col: 'publisher_name' },
-  { key: '场景',     table: 'scene',        col: 'scene_name' },
-  { key: '制服',     table: 'costume',      col: 'costume_name' },
-  { key: '标签',     table: 'tag',          col: 'tag_name' },
+  { key: '厂商', table: 'publisher', col: 'publisher_name' },
+  { key: '场景', table: 'scene', col: 'scene_name' },
+  { key: '制服', table: 'costume', col: 'costume_name' },
+  { key: '标签', table: 'tag', col: 'tag_name' },
 ]
 
 function el(tag, attrs = {}, children = []) {
@@ -21,6 +16,7 @@ function el(tag, attrs = {}, children = []) {
     if (k === 'class') node.className = v
     else if (k === 'html') node.innerHTML = v
     else if (k.startsWith('on') && typeof v === 'function') node.addEventListener(k.slice(2).toLowerCase(), v)
+    else if (v === null || v === undefined) continue
     else node.setAttribute(k, v)
   }
   for (const c of children) node.appendChild(c)
@@ -40,12 +36,6 @@ function ensureStyles() {
     .af-label{font-size:13px;color:rgba(0,0,0,.75);}
     .af-input, .af-select{width:100%;box-sizing:border-box;border:1px solid rgba(0,0,0,.25);border-radius:10px;padding:8px 10px;font-size:14px;}
     .af-footer{display:flex;justify-content:flex-end;gap:10px;margin-top:14px;}
-
-    /* 状态框：提交中/成功/失败（“适用于所有录入”的交互先在这里落地） */
-    .af-status{margin-top:12px;border-radius:10px;padding:10px;font-size:13px;white-space:pre-wrap;display:none;}
-    .af-status.info{border:1px solid rgba(0,0,0,.2);background:rgba(0,0,0,.03);color:rgba(0,0,0,.75);}
-    .af-status.ok{border:1px solid rgba(0,140,0,.25);background:rgba(0,140,0,.06);color:#075c07;}
-    .af-status.err{border:1px solid rgba(200,0,0,.25);background:rgba(200,0,0,.06);color:#7a0000;}
   `})
   document.head.appendChild(style)
 }
@@ -74,7 +64,7 @@ export function openMetaCreateModal() {
   const selectType = el('select', { class: 'af-select', name: 'meta_type' }, [
     ...META_TYPES.map((t, i) =>
       el('option', { value: t.key, selected: i === 0 ? 'true' : null }, [document.createTextNode(t.key)])
-    )
+    ),
   ])
 
   const inputName = el('input', {
@@ -88,22 +78,28 @@ export function openMetaCreateModal() {
   const grid = el('div', { class: 'af-grid' }, [
     el('div', { class: 'af-label' }, [document.createTextNode('选择信息类型')]),
     selectType,
-
     el('div', { class: 'af-label' }, [document.createTextNode('名称')]),
     inputName,
   ])
 
-  // 状态框 + “确定”按钮（按你的需求：提交中→成功→点确定回到录入页面）
-  const statusBox = el('div', { class: 'af-status info' })
-  const statusBtn = el('button', { class: 'af-btn', type: 'button', html: '确定', style: 'display:none;' })
+  // 通用提交状态：成功后点确定 → 回到录入页面（清空输入，可继续录下一条）
+  const status = createSubmitStatus({
+    onConfirm: () => {
+      status.hide()
+      btnSubmit.style.display = ''
+      btnCancel.style.display = ''
+      unlockForm()
+      inputName.value = ''
+      inputName.focus()
+    },
+  })
 
   const btnCancel = el('button', { class: 'af-btn', type: 'button', html: '取消' })
   const btnSubmit = el('button', { class: 'af-btn af-btn-primary', type: 'submit', html: '确认' })
   const footer = el('div', { class: 'af-footer' }, [btnCancel, btnSubmit])
 
   form.appendChild(grid)
-  form.appendChild(statusBox)
-  form.appendChild(statusBtn)
+  form.appendChild(status.element)
   form.appendChild(footer)
 
   modal.appendChild(header)
@@ -118,34 +114,14 @@ export function openMetaCreateModal() {
     if (e.key === 'Escape') close()
   }
 
-  function showStatus(kind, text) {
-    statusBox.className = `af-status ${kind}`
-    statusBox.style.display = 'block'
-    statusBox.textContent = text
-  }
-
-  function resetToEntryState() {
-    // 回到“录入页面”的状态：可继续录入下一条
-    statusBox.style.display = 'none'
-    statusBtn.style.display = 'none'
-    btnSubmit.style.display = ''
-    btnCancel.style.display = ''
-    btnClose.disabled = false
-    selectType.disabled = false
-    inputName.disabled = false
-    inputName.value = ''
-    inputName.focus()
-  }
-
-  function lockFormWhileSubmitting() {
+  function lockForm() {
     btnClose.disabled = true
     btnCancel.disabled = true
     btnSubmit.disabled = true
     selectType.disabled = true
     inputName.disabled = true
   }
-
-  function unlockFormAfterSubmitting() {
+  function unlockForm() {
     btnClose.disabled = false
     btnCancel.disabled = false
     btnSubmit.disabled = false
@@ -158,57 +134,41 @@ export function openMetaCreateModal() {
   overlay.addEventListener('click', (e) => { if (e.target === overlay) close() })
   document.addEventListener('keydown', onEsc)
 
-  statusBtn.addEventListener('click', () => {
-    // 按需求：成功后显示“录入成功”，点确定 → 回到录入页面（可继续录入）
-    resetToEntryState()
-  })
-
   form.addEventListener('submit', async (e) => {
     e.preventDefault()
+
+    status.hide()
 
     const typeKey = selectType.value
     const name = normText(inputName.value)
     const type = getTypeByKey(typeKey)
 
     if (!type) {
-      showStatus('err', '未知的信息类型。')
+      status.showError('未知的信息类型。')
       return
     }
     if (!name) {
-      showStatus('err', '名称必填。')
+      status.showError('名称必填。')
       return
     }
 
-    // 提交中
-    showStatus('info', '正在录入…')
-    lockFormWhileSubmitting()
+    status.showSubmitting('正在录入…')
+    lockForm()
 
     const payload = { [type.col]: name }
-
-    const { error } = await supabase
-      .from(type.table)
-      .insert(payload)
+    const { error } = await supabase.from(type.table).insert(payload)
 
     if (error) {
-      unlockFormAfterSubmitting()
-      showStatus('err', `录入失败：${error.message}`)
-      // 失败时仍留在可编辑状态，方便你改一下重试
-      selectType.disabled = false
-      inputName.disabled = false
-      btnClose.disabled = false
-      btnCancel.disabled = false
-      btnSubmit.disabled = false
+      unlockForm()
+      status.showError(`录入失败：${error.message}`)
       return
     }
 
-    // 成功：按你的需求，显示“录入成功”，并出现“确定”按钮；点确定回到录入页面
-    showStatus('ok', '录入成功')
+    // 成功：隐藏底部按钮，显示成功+确定；点确定回到录入页面
     btnSubmit.style.display = 'none'
     btnCancel.style.display = 'none'
-    statusBtn.style.display = ''
-    statusBtn.focus()
+    status.showSuccess('录入成功')
   })
 
-  // 初始聚焦
   inputName.focus()
 }
