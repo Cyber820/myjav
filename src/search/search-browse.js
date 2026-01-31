@@ -2,14 +2,11 @@
 import { supabase } from '../supabaseClient.js'
 
 /**
- * Browse Search + Filter
+ * Browse Search + Filter + Actress Filter
  * - 搜索：影片名 / 番号 / 女优名（并返回该女优出演影片）
  * - 结果：豆腐块展示，点开弹窗详情
- * - 筛选：本文件内实现（后续可拆分到 filter/ 目录）
- *
- * 筛选规则说明（可按需改）：
- * - 多选类（特点/制服/场景/标签）：命中“任意所选”即可（OR）
- *   若你想改成“必须包含全部所选”（AND），见 applyVideoFilters() 内注释。
+ * - 影片筛选：本文件内实现（筛选按钮）
+ * - 女优筛选：独立弹窗（女优筛选按钮）
  */
 
 function el(tag, attrs = {}, children = []) {
@@ -55,7 +52,7 @@ function ensureStyles() {
       .af-v{font-size:13px;white-space:pre-wrap;word-break:break-word;border-bottom:1px dashed rgba(0,0,0,.10);padding:6px 0;}
       .af-modal-foot{display:flex;justify-content:flex-end;gap:10px;margin-top:12px;}
 
-      /* ===== Filter popover ===== */
+      /* ===== Video Filter popover ===== */
       .af-pop{position:absolute;z-index:99998;top:52px;left:0;width:min(980px, calc(100vw - 24px));
         background:#fff;border:1px solid rgba(0,0,0,.18);border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,.12);
         padding:10px;display:none;
@@ -79,8 +76,34 @@ function ensureStyles() {
       .af-ms-item{display:flex;align-items:center;gap:8px;padding:4px 2px;}
       .af-ms-item label{font-size:13px;color:rgba(0,0,0,.82);cursor:pointer;}
       .af-ms-badge{font-size:11px;color:rgba(0,0,0,.6);}
-      .af-row2{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
       .af-mini{font-size:11px;color:rgba(0,0,0,.6);margin-top:6px;}
+
+      /* ===== Actress Filter modal UI ===== */
+      .af-af-grid{display:grid;grid-template-columns:180px 1fr;gap:10px 12px;align-items:start;}
+      .af-af-label{font-size:12px;color:rgba(0,0,0,.65);padding-top:8px;}
+      .af-af-row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;}
+      .af-dd{position:relative;width:100%;}
+      .af-dd-btnrow{display:flex;gap:8px;align-items:center;}
+      .af-dd-input{
+        flex:1;
+        width:100%;
+        box-sizing:border-box;border:1px solid rgba(0,0,0,.22);border-radius:10px;padding:8px 10px;font-size:13px;background:#fff;
+      }
+      .af-dd-arrow{
+        width:38px;min-width:38px;
+        border:1px solid rgba(0,0,0,.22);background:#fff;border-radius:10px;
+        padding:8px 0;cursor:pointer;text-align:center;
+      }
+      .af-dd-pop{
+        position:absolute;z-index:99999;top:44px;left:0;right:0;
+        background:#fff;border:1px solid rgba(0,0,0,.18);border-radius:12px;
+        box-shadow:0 10px 30px rgba(0,0,0,.12);
+        padding:8px;display:none;
+        max-height:220px;overflow:auto;
+      }
+      .af-dd-pop.open{display:block;}
+      .af-dd-item{display:flex;align-items:center;gap:8px;padding:4px 2px;}
+      .af-dd-item label{cursor:pointer;}
     `,
   })
   document.head.appendChild(style)
@@ -132,15 +155,22 @@ function clampRateOrNull(v) {
   return k
 }
 
+function toIntOrNull(v) {
+  const t = norm(v)
+  if (t === '') return null
+  const n = Number(t)
+  if (!Number.isFinite(n)) return NaN
+  return Math.trunc(n)
+}
+
 /* =========================
- * Search + bulk filterDoc hydration
+ * Search + bulk filterDoc hydration (videos)
  * ========================= */
 
 async function runSearch(query) {
   const q = norm(query)
-  if (!q) return { query: q, actresses: [], videos: [], videoMetaById: new Map(), videoFilterDocById: new Map() }
+  if (!q) return { mode: 'search', query: q, actresses: [], videos: [], videoMetaById: new Map(), videoFilterDocById: new Map() }
 
-  // 这里直接把筛选需要的字段都取出来，避免筛选时额外点查
   const videoSelect = [
     'video_id',
     'video_name',
@@ -192,14 +222,10 @@ async function runSearch(query) {
   }
 
   const videos = uniqBy([...videosByName, ...videosByCid, ...videosByActressLink], v => `${v.video_id}`)
-
-  // 卡片小字：女优名单（只要名字）
   const videoMetaById = await hydrateVideoCardMeta(videos.map(v => v.video_id))
-
-  // 关键：为筛选批量生成 filterDoc（link ids + rates）
   const videoFilterDocById = await hydrateVideoFilterDocs(videos)
 
-  return { query: q, actresses, videos, videoMetaById, videoFilterDocById }
+  return { mode: 'search', query: q, actresses, videos, videoMetaById, videoFilterDocById }
 }
 
 async function hydrateVideoCardMeta(videoIds) {
@@ -248,7 +274,6 @@ async function hydrateVideoFilterDocs(videos) {
     tag_ids: [],
   })
 
-  // 先塞基础字段（来自 video 表）
   for (const v of videos) {
     map.set(v.video_id, {
       video_id: v.video_id,
@@ -283,7 +308,6 @@ async function hydrateVideoFilterDocs(videos) {
       if (!out.has(vid)) out.set(vid, [])
       out.get(vid).push(tid)
     }
-    // 去重
     for (const [k, arr] of out) out.set(k, uniqBy(arr, x => `${x}`))
     return out
   }
@@ -308,7 +332,7 @@ async function hydrateVideoFilterDocs(videos) {
 }
 
 /* =========================
- * Detail fetching (for modal)
+ * Detail fetching (modal)
  * ========================= */
 
 async function fetchVideoDetail(video_id) {
@@ -348,7 +372,6 @@ async function fetchVideoDetail(video_id) {
     return list.map(id => nameById.get(id)).filter(Boolean)
   }
 
-  // actresses with DOB for age calc
   const actress_ids = await loadLinkIds('actress_in_video', 'actress_id')
   let actresses = []
   if (actress_ids.length) {
@@ -374,7 +397,6 @@ async function fetchVideoDetail(video_id) {
     fetchNamesByIds('tag', 'tag_id', 'tag_name', tag_ids),
   ])
 
-  // filterDoc（与列表缓存结构一致，后续你要做“详情里点筛选”也可复用）
   const filterDoc = {
     video_id: video.video_id,
     publish_date: video.publish_date ?? null,
@@ -402,11 +424,11 @@ async function fetchVideoDetail(video_id) {
     kind: 'video',
     video,
     publisherName,
-    actresses,       // [{ actress_id, actress_name, date_of_birth }]
-    actressTypes,    // [name...]
-    costumes,        // [name...]
-    scenes,          // [name...]
-    tags,            // [name...]
+    actresses,
+    actressTypes,
+    costumes,
+    scenes,
+    tags,
     filterDoc,
   }
 }
@@ -508,10 +530,10 @@ function labelMatchedBy(m) {
 }
 
 /* =========================
- * Filter UI + state
+ * Video filter UI + state
  * ========================= */
 
-function defaultFilterState() {
+function defaultVideoFilterState() {
   return {
     censored: 'any',      // 'any' | 'true' | 'false'
     has_special: 'any',   // 'any' | 'true' | 'false'
@@ -527,8 +549,7 @@ function defaultFilterState() {
   }
 }
 
-async function loadMetaOptions() {
-  // 只取 id + name；你的这些表结构都是 (id, name)
+async function loadVideoMetaOptions() {
   const queries = await Promise.all([
     supabase.from('actress_type').select('actress_type_id, actress_type_name').order('actress_type_name', { ascending: true }),
     supabase.from('costume').select('costume_id, costume_name').order('costume_name', { ascending: true }),
@@ -608,7 +629,7 @@ function applyVideoFilters({ videos, videoFilterDocById, filter }) {
   const parseBoolMode = (mode) => {
     if (mode === 'true') return true
     if (mode === 'false') return false
-    return null // any
+    return null
   }
 
   const censoredMode = parseBoolMode(filter.censored)
@@ -621,15 +642,10 @@ function applyVideoFilters({ videos, videoFilterDocById, filter }) {
   const minVoice = filter.min_personal_voice_rate
 
   const anyHit = (needSet, haveIds) => {
-    // “命中任意所选即可（OR）”
     if (!needSet || needSet.size === 0) return true
     if (!haveIds || haveIds.length === 0) return false
     for (const id of haveIds) if (needSet.has(String(id))) return true
     return false
-
-    // 若你想改为“必须包含全部所选（AND）”，用下面这段替换：
-    // for (const need of needSet) if (!haveIds.map(String).includes(String(need))) return false
-    // return true
   }
 
   const minOk = (val, min) => {
@@ -650,13 +666,11 @@ function applyVideoFilters({ videos, videoFilterDocById, filter }) {
       if (doc.has_special !== specialMode) continue
     }
 
-    // 多选类
     if (!anyHit(filter.actress_type_ids, doc.linkIds?.actress_type_ids)) continue
     if (!anyHit(filter.costume_ids, doc.linkIds?.costume_ids)) continue
     if (!anyHit(filter.scene_ids, doc.linkIds?.scene_ids)) continue
     if (!anyHit(filter.tag_ids, doc.linkIds?.tag_ids)) continue
 
-    // 最低评分
     if (!minOk(doc.rates?.video_personal_rate, minVideo)) continue
     if (!minOk(doc.rates?.personal_sex_rate, minSex)) continue
     if (!minOk(doc.rates?.overall_actress_personal_rate, minActress)) continue
@@ -670,6 +684,182 @@ function applyVideoFilters({ videos, videoFilterDocById, filter }) {
 }
 
 /* =========================
+ * Actress filter modal + query
+ * ========================= */
+
+function openActressFilterModal({ onApply } = {}) {
+  const overlay = el('div', { class: 'af-modal-overlay' })
+  const modal = el('div', { class: 'af-modal', role: 'dialog', 'aria-modal': 'true' })
+  overlay.appendChild(modal)
+
+  const title = el('div', { class: 'af-modal-title' }, [document.createTextNode('女优筛选')])
+  const btnClose = el('button', { class: 'af-btn', type: 'button', html: '关闭' })
+  const head = el('div', { class: 'af-modal-head' }, [title, btnClose])
+
+  const form = el('form')
+  const cupsSelected = new Set() // store letters as string
+
+  // Cup dropdown (only show options when click arrow)
+  const cupText = el('input', { class: 'af-dd-input', type: 'text', readonly: 'true', value: '（全部）' })
+  const cupArrow = el('button', { class: 'af-dd-arrow', type: 'button', html: '▾', title: '展开' })
+  const cupClear = el('button', { class: 'af-xbtn', type: 'button', html: '×', title: '清空' })
+
+  const cupPop = el('div', { class: 'af-dd-pop' })
+  const CUP_LIST = ['A','B','C','D','E','F','G','H','I','J','K']
+
+  function syncCupText() {
+    if (cupsSelected.size === 0) {
+      cupText.value = '（全部）'
+      return
+    }
+    cupText.value = Array.from(cupsSelected).sort().join(', ')
+  }
+
+  function renderCupPop() {
+    cupPop.innerHTML = ''
+    for (const c of CUP_LIST) {
+      const checked = cupsSelected.has(c)
+      const cb = el('input', {
+        type: 'checkbox',
+        checked: checked ? 'true' : null,
+        onchange: () => {
+          if (cb.checked) cupsSelected.add(c)
+          else cupsSelected.delete(c)
+          syncCupText()
+        },
+      })
+      const lab = el('label', {}, [document.createTextNode(c)])
+      cupPop.appendChild(el('div', { class: 'af-dd-item' }, [cb, lab]))
+    }
+  }
+
+  renderCupPop()
+  syncCupText()
+
+  cupArrow.addEventListener('click', () => {
+    cupPop.classList.toggle('open')
+  })
+  cupClear.addEventListener('click', () => {
+    cupsSelected.clear()
+    syncCupText()
+    renderCupPop()
+  })
+
+  // clicking outside pop closes it
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) return // don't close whole modal here
+    if (!modal.contains(e.target)) return
+    // if clicked inside modal but outside dropdown, close dropdown
+    if (!cupPop.contains(e.target) && e.target !== cupArrow) cupPop.classList.remove('open')
+  })
+
+  const cupField = el('div', { class: 'af-dd' }, [
+    el('div', { class: 'af-dd-btnrow' }, [cupText, cupArrow, cupClear]),
+    cupPop,
+  ])
+
+  // Height min/max
+  const minH = el('input', { class: 'af-num', type: 'number', min: '0', step: '1', placeholder: '最低身高（可空）' })
+  const maxH = el('input', { class: 'af-num', type: 'number', min: '0', step: '1', placeholder: '最高身高（可空）' })
+  const heightRow = el('div', { style: 'display:grid;grid-template-columns:1fr 1fr;gap:10px;' }, [minH, maxH])
+
+  // Min rate
+  const minRate = el('input', { class: 'af-num', type: 'number', min: '0', max: '100', step: '1', placeholder: '最低评分（0-100，可空）' })
+
+  const kv = el('div', { class: 'af-af-grid' }, [
+    el('div', { class: 'af-af-label' }, [document.createTextNode('罩杯')]),
+    cupField,
+
+    el('div', { class: 'af-af-label' }, [document.createTextNode('身高')]),
+    heightRow,
+
+    el('div', { class: 'af-af-label' }, [document.createTextNode('最低评分')]),
+    minRate,
+  ])
+
+  const btnCancel = el('button', { class: 'af-btn', type: 'button', html: '取消' })
+  const btnOk = el('button', { class: 'af-btn', type: 'submit', html: '确定' })
+  const foot = el('div', { class: 'af-modal-foot' }, [btnCancel, btnOk])
+
+  form.appendChild(kv)
+  form.appendChild(foot)
+
+  modal.appendChild(head)
+  modal.appendChild(form)
+  document.body.appendChild(overlay)
+
+  function close() {
+    overlay.remove()
+    document.removeEventListener('keydown', onEsc)
+  }
+  function onEsc(e) {
+    if (e.key === 'Escape') close()
+  }
+
+  btnClose.addEventListener('click', close)
+  btnCancel.addEventListener('click', close)
+  document.addEventListener('keydown', onEsc)
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault()
+
+    const minHeight = toIntOrNull(minH.value)
+    const maxHeight = toIntOrNull(maxH.value)
+    const rate = clampRateOrNull(minRate.value)
+
+    if (Number.isNaN(minHeight) || Number.isNaN(maxHeight)) {
+      alert('身高必须是数字或留空。')
+      return
+    }
+    if (minHeight != null && maxHeight != null && minHeight > maxHeight) {
+      alert('最低身高不能大于最高身高。')
+      return
+    }
+    if (Number.isNaN(rate)) {
+      alert('最低评分范围应为 0-100，或留空。')
+      return
+    }
+
+    const criteria = {
+      cups: Array.from(cupsSelected),
+      minHeight,
+      maxHeight,
+      minRate: rate,
+    }
+
+    try {
+      await onApply?.(criteria)
+      close()
+    } catch (err) {
+      alert(`筛选失败：${err?.message ?? String(err)}`)
+    }
+  })
+}
+
+async function runActressFilter(criteria) {
+  let q = supabase.from('actress').select('actress_id, actress_name')
+
+  if (criteria?.cups?.length) {
+    q = q.in('cup', criteria.cups)
+  }
+  if (criteria?.minHeight != null) {
+    q = q.gte('height', criteria.minHeight)
+  }
+  if (criteria?.maxHeight != null) {
+    q = q.lte('height', criteria.maxHeight)
+  }
+  if (criteria?.minRate != null) {
+    q = q.gte('personal_rate', criteria.minRate)
+  }
+
+  q = q.order('actress_name', { ascending: true }).limit(2000)
+
+  const { data, error } = await q
+  if (error) throw new Error(error.message)
+  return data || []
+}
+
+/* =========================
  * Render results
  * ========================= */
 
@@ -680,14 +870,16 @@ function renderResults(mount, state, filteredVideos) {
     mount.appendChild(el('div', { class: 'af-err', html: `检索失败：${state.error}` }))
     return
   }
-  if (!state.query) {
+
+  // 女优筛选模式：允许没有 query
+  if (state.mode !== 'actress_filter' && !state.query) {
     mount.appendChild(el('div', { class: 'af-empty' }, [document.createTextNode('请输入关键字后检索。')]))
     return
   }
 
   const grid = el('div', { class: 'af-grid' })
 
-  // 女优结果（不参与筛选）
+  // 女优结果（两种模式都会显示）
   for (const a of state.actresses || []) {
     const card = el('div', { class: 'af-card' })
     card.appendChild(el('div', { class: 'af-card-title' }, [document.createTextNode(a.actress_name)]))
@@ -703,30 +895,32 @@ function renderResults(mount, state, filteredVideos) {
     grid.appendChild(card)
   }
 
-  // 影片结果（参与筛选）
-  for (const v of filteredVideos || []) {
-    const meta = state.videoMetaById?.get(v.video_id) || { actresses: [] }
-    const actressesText = (meta.actresses || []).slice(0, 8).join('、')
-    const sub = [
-      v.content_id ? `番号：${v.content_id}` : '番号：',
-      actressesText ? `女优：${actressesText}` : '女优：',
-    ].join('\n')
+  // 影片结果（仅 search 模式显示，且参与筛选）
+  if (state.mode === 'search') {
+    for (const v of filteredVideos || []) {
+      const meta = state.videoMetaById?.get(v.video_id) || { actresses: [] }
+      const actressesText = (meta.actresses || []).slice(0, 8).join('、')
+      const sub = [
+        v.content_id ? `番号：${v.content_id}` : '番号：',
+        actressesText ? `女优：${actressesText}` : '女优：',
+      ].join('\n')
 
-    const card = el('div', { class: 'af-card' })
-    card.appendChild(el('div', { class: 'af-card-title' }, [
-      document.createTextNode(v.video_name),
-      el('span', { class: 'af-chip' }, [document.createTextNode(labelMatchedBy(v.matched_by))]),
-    ]))
-    card.appendChild(el('div', { class: 'af-card-sub' }, [document.createTextNode(sub)]))
-    card.addEventListener('click', async () => {
-      try {
-        const d = await fetchVideoDetail(v.video_id)
-        openDetailModal({ title: `影片：${v.video_name}`, rows: videoDetailRows(d) })
-      } catch (e) {
-        alert(`加载详情失败：${e?.message ?? String(e)}`)
-      }
-    })
-    grid.appendChild(card)
+      const card = el('div', { class: 'af-card' })
+      card.appendChild(el('div', { class: 'af-card-title' }, [
+        document.createTextNode(v.video_name),
+        el('span', { class: 'af-chip' }, [document.createTextNode(labelMatchedBy(v.matched_by))]),
+      ]))
+      card.appendChild(el('div', { class: 'af-card-sub' }, [document.createTextNode(sub)]))
+      card.addEventListener('click', async () => {
+        try {
+          const d = await fetchVideoDetail(v.video_id)
+          openDetailModal({ title: `影片：${v.video_name}`, rows: videoDetailRows(d) })
+        } catch (e) {
+          alert(`加载详情失败：${e?.message ?? String(e)}`)
+        }
+      })
+      grid.appendChild(card)
+    }
   }
 
   if (grid.children.length === 0) {
@@ -749,19 +943,21 @@ export function mountSearchBrowsePage({ containerId = 'app' } = {}) {
   host.innerHTML = ''
   const page = el('div', { class: 'af-page' })
 
-  // search controls
-  const btnFilter = el('button', { class: 'af-btn', type: 'button', html: '筛选' })
+  // ===== UI order required:
+  // input | 筛选 | 检索 | 女优筛选
   const input = el('input', { class: 'af-input', type: 'text', placeholder: '输入影片名 / 番号 / 女优名…', autocomplete: 'off' })
+  const btnFilter = el('button', { class: 'af-btn', type: 'button', html: '筛选' })
   const btnSearch = el('button', { class: 'af-btn', type: 'button', html: '检索' })
+  const btnActressFilter = el('button', { class: 'af-btn', type: 'button', html: '女优筛选' })
 
   const hint = el('div', { class: 'af-hint' }, [
-    document.createTextNode('检索：影片名、番号、女优名（并返回该女优出演影片）。筛选只作用于影片结果。'),
+    document.createTextNode('检索：影片名、番号、女优名（并返回该女优出演影片）。筛选只作用于影片结果；“女优筛选”会直接列出符合条件的女优。'),
   ])
   const resultMount = el('div')
 
-  const bar = el('div', { class: 'af-bar' }, [btnFilter, input, btnSearch])
+  const bar = el('div', { class: 'af-bar' }, [input, btnFilter, btnSearch, btnActressFilter])
 
-  // filter popover
+  // filter popover (video filter)
   const pop = el('div', { class: 'af-pop', id: 'af-filter-pop' })
   bar.appendChild(pop)
 
@@ -770,14 +966,15 @@ export function mountSearchBrowsePage({ containerId = 'app' } = {}) {
   page.appendChild(resultMount)
   host.appendChild(page)
 
-  // state
+  // ===== video filter state
   let meta = null
   let metaLoading = false
   let metaError = null
+  const vfilter = defaultVideoFilterState()
 
-  const filter = defaultFilterState()
-
+  // ===== page state
   let lastState = {
+    mode: 'search',
     query: '',
     actresses: [],
     videos: [],
@@ -790,26 +987,19 @@ export function mountSearchBrowsePage({ containerId = 'app' } = {}) {
     return applyVideoFilters({
       videos: lastState.videos || [],
       videoFilterDocById: lastState.videoFilterDocById || new Map(),
-      filter,
+      filter: vfilter,
     })
   }
 
   function rerender() {
-    const filteredVideos = computeFilteredVideos()
+    const filteredVideos = (lastState.mode === 'search') ? computeFilteredVideos() : []
     renderResults(resultMount, lastState, filteredVideos)
   }
 
-  // open/close filter pop
-  function closePop() {
-    pop.classList.remove('open')
-  }
-  function openPop() {
-    pop.classList.add('open')
-  }
-  function togglePop() {
-    if (pop.classList.contains('open')) closePop()
-    else openPop()
-  }
+  // ===== video filter pop open/close
+  function closePop() { pop.classList.remove('open') }
+  function openPop() { pop.classList.add('open') }
+  function togglePop() { pop.classList.contains('open') ? closePop() : openPop() }
 
   btnFilter.addEventListener('click', async () => {
     togglePop()
@@ -818,14 +1008,14 @@ export function mountSearchBrowsePage({ containerId = 'app' } = {}) {
     if (!meta && !metaLoading && !metaError) {
       metaLoading = true
       try {
-        meta = await loadMetaOptions()
+        meta = await loadVideoMetaOptions()
       } catch (e) {
         metaError = e?.message ?? String(e)
       } finally {
         metaLoading = false
       }
     }
-    renderFilterUI()
+    renderVideoFilterUI()
   })
 
   document.addEventListener('click', (e) => {
@@ -837,11 +1027,7 @@ export function mountSearchBrowsePage({ containerId = 'app' } = {}) {
     if (e.key === 'Escape') closePop()
   })
 
-  // Build filter UI
-  let uiMounted = false
-  let msType, msCostume, msScene, msTag
-
-  function renderFilterUI() {
+  function renderVideoFilterUI() {
     pop.innerHTML = ''
 
     const head = el('div', { class: 'af-pop-head' }, [
@@ -861,102 +1047,80 @@ export function mountSearchBrowsePage({ containerId = 'app' } = {}) {
 
     const grid = el('div', { class: 'af-pop-grid' })
 
-    // A. 是否有码
+    // A 是否有码
     const selCensored = el('select', { class: 'af-select' }, [
       el('option', { value: 'any' }, [document.createTextNode('皆可（默认）')]),
       el('option', { value: 'true' }, [document.createTextNode('有')]),
       el('option', { value: 'false' }, [document.createTextNode('无')]),
     ])
-    selCensored.value = filter.censored
-    selCensored.addEventListener('change', () => { filter.censored = selCensored.value; rerender() })
+    selCensored.value = vfilter.censored
+    selCensored.addEventListener('change', () => { vfilter.censored = selCensored.value; rerender() })
 
-    const fieldCensored = el('div', { class: 'af-field' }, [
+    grid.appendChild(el('div', { class: 'af-field' }, [
       el('div', { class: 'af-field-title' }, [
         el('span', {}, [document.createTextNode('是否有码')]),
-        el('button', {
-          type: 'button',
-          class: 'af-xbtn',
-          html: '×',
-          title: '恢复默认（皆可）',
-          onclick: () => { filter.censored = 'any'; selCensored.value = 'any'; rerender() },
-        }),
+        el('button', { type: 'button', class: 'af-xbtn', html: '×', title: '恢复默认（皆可）', onclick: () => { vfilter.censored = 'any'; selCensored.value = 'any'; rerender() } }),
       ]),
       selCensored,
-    ])
-    grid.appendChild(fieldCensored)
+    ]))
 
-    // K. 是否猎奇
+    // K 是否猎奇
     const selSpecial = el('select', { class: 'af-select' }, [
       el('option', { value: 'any' }, [document.createTextNode('皆可（默认）')]),
       el('option', { value: 'true' }, [document.createTextNode('有')]),
       el('option', { value: 'false' }, [document.createTextNode('无')]),
     ])
-    selSpecial.value = filter.has_special
-    selSpecial.addEventListener('change', () => { filter.has_special = selSpecial.value; rerender() })
+    selSpecial.value = vfilter.has_special
+    selSpecial.addEventListener('change', () => { vfilter.has_special = selSpecial.value; rerender() })
 
-    const fieldSpecial = el('div', { class: 'af-field' }, [
+    grid.appendChild(el('div', { class: 'af-field' }, [
       el('div', { class: 'af-field-title' }, [
         el('span', {}, [document.createTextNode('是否猎奇')]),
-        el('button', {
-          type: 'button',
-          class: 'af-xbtn',
-          html: '×',
-          title: '恢复默认（皆可）',
-          onclick: () => { filter.has_special = 'any'; selSpecial.value = 'any'; rerender() },
-        }),
+        el('button', { type: 'button', class: 'af-xbtn', html: '×', title: '恢复默认（皆可）', onclick: () => { vfilter.has_special = 'any'; selSpecial.value = 'any'; rerender() } }),
       ]),
       selSpecial,
-    ])
-    grid.appendChild(fieldSpecial)
+    ]))
 
     // B/C/D/E 多选
-    msType = createMultiSelectField({
+    grid.appendChild(createMultiSelectField({
       title: '女优特点',
       options: meta.actress_type,
-      selectedSet: filter.actress_type_ids,
+      selectedSet: vfilter.actress_type_ids,
       onChange: () => rerender(),
-    })
-    msCostume = createMultiSelectField({
+    }).element)
+
+    grid.appendChild(createMultiSelectField({
       title: '制服',
       options: meta.costume,
-      selectedSet: filter.costume_ids,
+      selectedSet: vfilter.costume_ids,
       onChange: () => rerender(),
-    })
-    msScene = createMultiSelectField({
+    }).element)
+
+    grid.appendChild(createMultiSelectField({
       title: '场景',
       options: meta.scene,
-      selectedSet: filter.scene_ids,
+      selectedSet: vfilter.scene_ids,
       onChange: () => rerender(),
-    })
-    msTag = createMultiSelectField({
+    }).element)
+
+    grid.appendChild(createMultiSelectField({
       title: '标签',
       options: meta.tag,
-      selectedSet: filter.tag_ids,
+      selectedSet: vfilter.tag_ids,
       onChange: () => rerender(),
-    })
-
-    grid.appendChild(msType.element)
-    grid.appendChild(msCostume.element)
-    grid.appendChild(msScene.element)
-    grid.appendChild(msTag.element)
+    }).element)
 
     // F～J 最低评分
     const makeMinRateField = (title, key) => {
       const input = el('input', { class: 'af-num', type: 'number', min: '0', max: '100', step: '1', placeholder: '不填写则不筛选' })
-      input.value = filter[key] == null ? '' : String(filter[key])
+      input.value = vfilter[key] == null ? '' : String(vfilter[key])
       input.addEventListener('input', () => {
         const v = clampRateOrNull(input.value)
         if (Number.isNaN(v)) return
-        filter[key] = v
+        vfilter[key] = v
         rerender()
       })
-      const clear = el('button', {
-        type: 'button',
-        class: 'af-xbtn',
-        html: '×',
-        title: '清空',
-        onclick: () => { filter[key] = null; input.value = ''; rerender() },
-      })
+      const clear = el('button', { type: 'button', class: 'af-xbtn', html: '×', title: '清空', onclick: () => { vfilter[key] = null; input.value = ''; rerender() } })
       return el('div', { class: 'af-field' }, [
         el('div', { class: 'af-field-title' }, [el('span', {}, [document.createTextNode(title)]), clear]),
         input,
@@ -978,39 +1142,51 @@ export function mountSearchBrowsePage({ containerId = 'app' } = {}) {
       type: 'button',
       html: '重置全部筛选',
       onclick: () => {
-        const d = defaultFilterState()
-        filter.censored = d.censored
-        filter.has_special = d.has_special
-        filter.actress_type_ids.clear()
-        filter.costume_ids.clear()
-        filter.scene_ids.clear()
-        filter.tag_ids.clear()
-        filter.min_video_personal_rate = null
-        filter.min_personal_sex_rate = null
-        filter.min_overall_actress_personal_rate = null
-        filter.min_personal_acting_rate = null
-        filter.min_personal_voice_rate = null
+        const d = defaultVideoFilterState()
+        vfilter.censored = d.censored
+        vfilter.has_special = d.has_special
+        vfilter.actress_type_ids.clear()
+        vfilter.costume_ids.clear()
+        vfilter.scene_ids.clear()
+        vfilter.tag_ids.clear()
+        vfilter.min_video_personal_rate = null
+        vfilter.min_personal_sex_rate = null
+        vfilter.min_overall_actress_personal_rate = null
+        vfilter.min_personal_acting_rate = null
+        vfilter.min_personal_voice_rate = null
 
-        // 重新渲染整个 pop（让控件同步回默认值）
-        renderFilterUI()
+        renderVideoFilterUI()
         rerender()
       },
     })
-
-    const btnApply = el('button', {
-      class: 'af-btn',
-      type: 'button',
-      html: '应用筛选',
-      onclick: () => { rerender(); closePop() },
-    })
-
+    const btnApply = el('button', { class: 'af-btn', type: 'button', html: '应用筛选', onclick: () => { rerender(); closePop() } })
     pop.appendChild(el('div', { class: 'af-modal-foot' }, [btnReset, btnApply]))
-    uiMounted = true
   }
 
-  // initial render (empty)
+  // ===== actress filter button
+  btnActressFilter.addEventListener('click', () => {
+    openActressFilterModal({
+      onApply: async (criteria) => {
+        // 用筛选结果替换当前结果区显示（符合你“点击确定，显示符合条件的所有女优”）
+        const rows = await runActressFilter(criteria)
+        lastState = {
+          mode: 'actress_filter',
+          query: '',
+          actresses: rows,
+          videos: [],
+          videoMetaById: new Map(),
+          videoFilterDocById: new Map(),
+          error: null,
+        }
+        rerender()
+      },
+    })
+  })
+
+  // ===== init render
   rerender()
 
+  // ===== search actions
   async function run() {
     const q = norm(input.value)
     btnSearch.disabled = true
@@ -1020,6 +1196,7 @@ export function mountSearchBrowsePage({ containerId = 'app' } = {}) {
       rerender()
     } catch (e) {
       lastState = {
+        mode: 'search',
         query: q,
         actresses: [],
         videos: [],
