@@ -11,6 +11,7 @@ export default defineConfig({
       input: {
         index: resolve(__dirname, 'index.html'),
         editor: resolve(__dirname, 'editor.html'),
+        browse: resolve(__dirname, 'browse.html'),
         'auth-callback': resolve(__dirname, 'auth-callback.html'),
       },
     },
