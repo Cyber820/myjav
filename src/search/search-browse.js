@@ -6,6 +6,10 @@ import { supabase } from '../supabaseClient.js'
  * - 满足当前 5 个需求
  * - 不提供编辑入口
  * - 输出结构更“可过滤”：video 详情里保留更多字段（用于后续 filter 文件复用）
+ *
+ * 本版更新：
+ * 1) 详情弹窗加入 XXX评分（video.personal_sex_rate）
+ * 2) 详情弹窗“出演女优”一行一个名字；若有生日(date_of_birth) + 发售日期(publish_date)，显示发售时年龄（发售年-出生年）
  */
 
 function el(tag, attrs = {}, children = []) {
@@ -69,6 +73,28 @@ function uniqBy(arr, keyFn) {
     out.push(x)
   }
   return out
+}
+
+function yearFromISODate(d) {
+  // d can be 'YYYY-MM-DD' or null
+  if (!d || typeof d !== 'string') return null
+  const m = /^(\d{4})-\d{2}-\d{2}$/.exec(d)
+  if (!m) return null
+  return Number(m[1])
+}
+
+function formatActressesWithAge({ actresses, publish_date }) {
+  // actresses: [{ actress_id, actress_name, date_of_birth }]
+  const pubYear = yearFromISODate(publish_date)
+  return (actresses || []).map(a => {
+    const name = a?.actress_name ?? ''
+    const birthYear = yearFromISODate(a?.date_of_birth)
+    if (pubYear && birthYear) {
+      const age = pubYear - birthYear
+      if (Number.isFinite(age) && age >= 0 && age <= 120) return `${name}（${age}）`
+    }
+    return name
+  })
 }
 
 async function runSearch(query) {
@@ -155,7 +181,29 @@ async function fetchVideoDetail(video_id) {
     if (!eP) publisherName = p?.publisher_name ?? null
   }
 
-  const loadNamesByLink = async (linkTable, idCol, targetTable, targetIdCol, targetNameCol) => {
+  // 这里为了“出演女优显示年龄”，actress 需要多取 date_of_birth
+  const loadNamesByLink = async (linkTable, idCol, targetTable, targetIdCol, targetCols) => {
+    const { data: links, error: e1 } = await supabase.from(linkTable).select(`${idCol}`).eq('video_id', video_id).limit(5000)
+    if (e1) throw new Error(e1.message)
+    const ids = uniqBy((links || []).map(x => x[idCol]), x => `${x}`)
+    if (!ids.length) return []
+    const { data: rows, error: e2 } = await supabase.from(targetTable).select(targetCols).in(targetIdCol, ids).limit(5000)
+    if (e2) throw new Error(e2.message)
+
+    // rows -> map by id, then keep original id order
+    const byId = new Map((rows || []).map(r => [r[targetIdCol], r]))
+    return ids.map(id => byId.get(id)).filter(Boolean)
+  }
+
+  const actresses = await loadNamesByLink(
+    'actress_in_video',
+    'actress_id',
+    'actress',
+    'actress_id',
+    'actress_id, actress_name, date_of_birth'
+  )
+
+  const loadNamesOnly = async (linkTable, idCol, targetTable, targetIdCol, targetNameCol) => {
     const { data: links, error: e1 } = await supabase.from(linkTable).select(`${idCol}`).eq('video_id', video_id).limit(5000)
     if (e1) throw new Error(e1.message)
     const ids = uniqBy((links || []).map(x => x[idCol]), x => `${x}`)
@@ -166,12 +214,11 @@ async function fetchVideoDetail(video_id) {
     return ids.map(id => nameById.get(id)).filter(Boolean)
   }
 
-  const [actresses, actressTypes, costumes, scenes, tags] = await Promise.all([
-    loadNamesByLink('actress_in_video', 'actress_id', 'actress', 'actress_id', 'actress_name'),
-    loadNamesByLink('actress_type_in_video', 'actress_type_id', 'actress_type', 'actress_type_id', 'actress_type_name'),
-    loadNamesByLink('costume_in_video', 'costume_id', 'costume', 'costume_id', 'costume_name'),
-    loadNamesByLink('video_scene', 'scene_id', 'scene', 'scene_id', 'scene_name'),
-    loadNamesByLink('video_tag', 'tag_id', 'tag', 'tag_id', 'tag_name'),
+  const [actressTypes, costumes, scenes, tags] = await Promise.all([
+    loadNamesOnly('actress_type_in_video', 'actress_type_id', 'actress_type', 'actress_type_id', 'actress_type_name'),
+    loadNamesOnly('costume_in_video', 'costume_id', 'costume', 'costume_id', 'costume_name'),
+    loadNamesOnly('video_scene', 'scene_id', 'scene', 'scene_id', 'scene_name'),
+    loadNamesOnly('video_tag', 'tag_id', 'tag', 'tag_id', 'tag_name'),
   ])
 
   return { kind: 'video', video, publisherName, actresses, actressTypes, costumes, scenes, tags }
@@ -194,6 +241,7 @@ function openDetailModal({ title, rows }) {
     el('div', { class: 'af-modal-title' }, [document.createTextNode(title)]),
     el('button', { class: 'af-btn', type: 'button', html: '关闭', onclick: () => close() }),
   ])
+
   const kv = el('div', { class: 'af-kv' })
   for (const { k, v } of rows) {
     kv.appendChild(el('div', { class: 'af-k' }, [document.createTextNode(k)]))
@@ -224,6 +272,10 @@ function openDetailModal({ title, rows }) {
 
 function videoDetailRows(d) {
   const v = d.video
+
+  // 一行一个名字；若有生日 + 发售日期，则显示年龄（发售年-出生年）
+  const actressLines = formatActressesWithAge({ actresses: d.actresses || [], publish_date: v.publish_date }).join('\n')
+
   return [
     { k: '影片名称', v: v.video_name ?? '' },
     { k: '番号', v: v.content_id ?? '' },
@@ -232,13 +284,19 @@ function videoDetailRows(d) {
     { k: '有码', v: v.censored === true ? '有码' : (v.censored === false ? '无码' : '') },
     { k: '长度（分钟）', v: v.length != null ? String(v.length) : '' },
 
-    { k: '出演女优', v: (d.actresses || []).join('、') },
+    // ✅ 一行一个名字 + 年龄
+    { k: '出演女优', v: actressLines },
+
     { k: '女优特点', v: (d.actressTypes || []).join('、') },
     { k: '制服', v: (d.costumes || []).join('、') },
     { k: '场景', v: (d.scenes || []).join('、') },
     { k: '标签', v: (d.tags || []).join('、') },
 
     { k: '总体评分', v: v.video_personal_rate != null ? String(v.video_personal_rate) : '' },
+
+    // ✅ 新增展示：XXX评分（personal_sex_rate）
+    { k: 'XXX评分', v: v.personal_sex_rate != null ? String(v.personal_sex_rate) : '' },
+
     { k: '女优评分', v: v.overall_actress_personal_rate != null ? String(v.overall_actress_personal_rate) : '' },
     { k: '演技评分', v: v.personal_acting_rate != null ? String(v.personal_acting_rate) : '' },
     { k: '声音评分', v: v.personal_voice_rate != null ? String(v.personal_voice_rate) : '' },
