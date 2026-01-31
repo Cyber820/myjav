@@ -3,13 +3,14 @@ import { supabase } from '../supabaseClient.js'
 
 /**
  * Search (Browse/Filter route)
- * - 满足当前 5 个需求
+ * - 满足当前：搜索 + 豆腐块结果 + 点击弹窗详情
  * - 不提供编辑入口
- * - 输出结构更“可过滤”：video 详情里保留更多字段（用于后续 filter 文件复用）
+ * - 为后续 filter 做准备：video detail 返回 filterDoc（结构化字段）
  *
  * 本版更新：
  * 1) 详情弹窗加入 XXX评分（video.personal_sex_rate）
- * 2) 详情弹窗“出演女优”一行一个名字；若有生日(date_of_birth) + 发售日期(publish_date)，显示发售时年龄（发售年-出生年）
+ * 2) 详情弹窗“出演女优”一行一个名字；若有生日(date_of_birth)+发售日期(publish_date)，显示发售时年龄（发售年-出生年）
+ * 3) fetchVideoDetail 返回 filterDoc：包含可过滤字段与关联 ids
  */
 
 function el(tag, attrs = {}, children = []) {
@@ -76,7 +77,6 @@ function uniqBy(arr, keyFn) {
 }
 
 function yearFromISODate(d) {
-  // d can be 'YYYY-MM-DD' or null
   if (!d || typeof d !== 'string') return null
   const m = /^(\d{4})-\d{2}-\d{2}$/.exec(d)
   if (!m) return null
@@ -101,9 +101,23 @@ async function runSearch(query) {
   const q = norm(query)
   if (!q) return { query: q, actresses: [], videos: [], videoMetaById: new Map() }
 
-  const p1 = supabase.from('video').select('video_id, video_name, content_id, publish_date, censored, publisher_id').ilike('video_name', `%${q}%`).limit(50)
-  const p2 = supabase.from('video').select('video_id, video_name, content_id, publish_date, censored, publisher_id').ilike('content_id', `%${q}%`).limit(50)
-  const p3 = supabase.from('actress').select('actress_id, actress_name').ilike('actress_name', `%${q}%`).limit(50)
+  const p1 = supabase
+    .from('video')
+    .select('video_id, video_name, content_id, publish_date, censored, publisher_id')
+    .ilike('video_name', `%${q}%`)
+    .limit(50)
+
+  const p2 = supabase
+    .from('video')
+    .select('video_id, video_name, content_id, publish_date, censored, publisher_id')
+    .ilike('content_id', `%${q}%`)
+    .limit(50)
+
+  const p3 = supabase
+    .from('actress')
+    .select('actress_id, actress_name')
+    .ilike('actress_name', `%${q}%`)
+    .limit(50)
 
   const [r1, r2, r3] = await Promise.all([p1, p2, p3])
   const err = r1.error || r2.error || r3.error
@@ -116,7 +130,11 @@ async function runSearch(query) {
   let videosByActressLink = []
   if (actresses.length) {
     const actressIds = actresses.map(a => a.actress_id)
-    const { data: links, error: e1 } = await supabase.from('actress_in_video').select('video_id, actress_id').in('actress_id', actressIds).limit(2000)
+    const { data: links, error: e1 } = await supabase
+      .from('actress_in_video')
+      .select('video_id, actress_id')
+      .in('actress_id', actressIds)
+      .limit(2000)
     if (e1) throw new Error(e1.message)
 
     const videoIds = uniqBy((links || []).map(x => x.video_id), x => `${x}`)
@@ -175,53 +193,104 @@ async function fetchVideoDetail(video_id) {
   const { data: video, error: e0 } = await supabase.from('video').select('*').eq('video_id', video_id).single()
   if (e0) throw new Error(e0.message)
 
+  // publisher name（展示用）
   let publisherName = null
   if (video.publisher_id != null) {
-    const { data: p, error: eP } = await supabase.from('publisher').select('publisher_name').eq('publisher_id', video.publisher_id).single()
+    const { data: p, error: eP } = await supabase
+      .from('publisher')
+      .select('publisher_name')
+      .eq('publisher_id', video.publisher_id)
+      .single()
     if (!eP) publisherName = p?.publisher_name ?? null
   }
 
-  // 这里为了“出演女优显示年龄”，actress 需要多取 date_of_birth
-  const loadNamesByLink = async (linkTable, idCol, targetTable, targetIdCol, targetCols) => {
-    const { data: links, error: e1 } = await supabase.from(linkTable).select(`${idCol}`).eq('video_id', video_id).limit(5000)
-    if (e1) throw new Error(e1.message)
-    const ids = uniqBy((links || []).map(x => x[idCol]), x => `${x}`)
-    if (!ids.length) return []
-    const { data: rows, error: e2 } = await supabase.from(targetTable).select(targetCols).in(targetIdCol, ids).limit(5000)
-    if (e2) throw new Error(e2.message)
-
-    // rows -> map by id, then keep original id order
-    const byId = new Map((rows || []).map(r => [r[targetIdCol], r]))
-    return ids.map(id => byId.get(id)).filter(Boolean)
+  // 统一：从 link 表取 ids（过滤用）
+  const loadLinkIds = async (linkTable, idCol) => {
+    const { data: links, error } = await supabase
+      .from(linkTable)
+      .select(idCol)
+      .eq('video_id', video_id)
+      .limit(5000)
+    if (error) throw new Error(error.message)
+    return uniqBy((links || []).map(x => x[idCol]).filter(Boolean), x => `${x}`)
   }
 
-  const actresses = await loadNamesByLink(
-    'actress_in_video',
-    'actress_id',
-    'actress',
-    'actress_id',
-    'actress_id, actress_name, date_of_birth'
-  )
-
-  const loadNamesOnly = async (linkTable, idCol, targetTable, targetIdCol, targetNameCol) => {
-    const { data: links, error: e1 } = await supabase.from(linkTable).select(`${idCol}`).eq('video_id', video_id).limit(5000)
-    if (e1) throw new Error(e1.message)
-    const ids = uniqBy((links || []).map(x => x[idCol]), x => `${x}`)
-    if (!ids.length) return []
-    const { data: rows, error: e2 } = await supabase.from(targetTable).select(`${targetIdCol}, ${targetNameCol}`).in(targetIdCol, ids).limit(5000)
-    if (e2) throw new Error(e2.message)
-    const nameById = new Map((rows || []).map(r => [r[targetIdCol], r[targetNameCol]]))
-    return ids.map(id => nameById.get(id)).filter(Boolean)
+  // 从目标表按 ids 取 name（展示用）
+  const fetchNamesByIds = async (table, idCol, nameCol, ids) => {
+    const list = (ids || []).filter(Boolean)
+    if (!list.length) return []
+    const { data: rows, error } = await supabase
+      .from(table)
+      .select(`${idCol}, ${nameCol}`)
+      .in(idCol, list)
+      .limit(5000)
+    if (error) throw new Error(error.message)
+    const nameById = new Map((rows || []).map(r => [r[idCol], r[nameCol]]))
+    return list.map(id => nameById.get(id)).filter(Boolean)
   }
 
+  // actresses：展示需要 date_of_birth（用于年龄）
+  const actress_ids = await loadLinkIds('actress_in_video', 'actress_id')
+  let actresses = []
+  if (actress_ids.length) {
+    const { data: rows, error } = await supabase
+      .from('actress')
+      .select('actress_id, actress_name, date_of_birth')
+      .in('actress_id', actress_ids)
+      .limit(5000)
+    if (error) throw new Error(error.message)
+    const byId = new Map((rows || []).map(r => [r.actress_id, r]))
+    actresses = actress_ids.map(id => byId.get(id)).filter(Boolean)
+  }
+
+  // other link ids（过滤用）
+  const actress_type_ids = await loadLinkIds('actress_type_in_video', 'actress_type_id')
+  const costume_ids = await loadLinkIds('costume_in_video', 'costume_id')
+  const scene_ids = await loadLinkIds('video_scene', 'scene_id')
+  const tag_ids = await loadLinkIds('video_tag', 'tag_id')
+
+  // other names（展示用）
   const [actressTypes, costumes, scenes, tags] = await Promise.all([
-    loadNamesOnly('actress_type_in_video', 'actress_type_id', 'actress_type', 'actress_type_id', 'actress_type_name'),
-    loadNamesOnly('costume_in_video', 'costume_id', 'costume', 'costume_id', 'costume_name'),
-    loadNamesOnly('video_scene', 'scene_id', 'scene', 'scene_id', 'scene_name'),
-    loadNamesOnly('video_tag', 'tag_id', 'tag', 'tag_id', 'tag_name'),
+    fetchNamesByIds('actress_type', 'actress_type_id', 'actress_type_name', actress_type_ids),
+    fetchNamesByIds('costume', 'costume_id', 'costume_name', costume_ids),
+    fetchNamesByIds('scene', 'scene_id', 'scene_name', scene_ids),
+    fetchNamesByIds('tag', 'tag_id', 'tag_name', tag_ids),
   ])
 
-  return { kind: 'video', video, publisherName, actresses, actressTypes, costumes, scenes, tags }
+  // ✅ 结构化 filterDoc：后续 filter-engine 直接吃这个
+  const filterDoc = {
+    video_id: video.video_id,
+    publish_date: video.publish_date ?? null,
+    censored: video.censored ?? null,
+    publisher_id: video.publisher_id ?? null,
+    rates: {
+      video_personal_rate: video.video_personal_rate ?? null,
+      personal_sex_rate: video.personal_sex_rate ?? null,
+      overall_actress_personal_rate: video.overall_actress_personal_rate ?? null,
+      personal_acting_rate: video.personal_acting_rate ?? null,
+      personal_voice_rate: video.personal_voice_rate ?? null,
+      length: video.length ?? null,
+    },
+    linkIds: {
+      actress_ids,
+      actress_type_ids,
+      costume_ids,
+      scene_ids,
+      tag_ids,
+    },
+  }
+
+  return {
+    kind: 'video',
+    video,
+    publisherName,
+    actresses,       // [{ actress_id, actress_name, date_of_birth }]
+    actressTypes,    // [name...]
+    costumes,        // [name...]
+    scenes,          // [name...]
+    tags,            // [name...]
+    filterDoc,       // ✅
+  }
 }
 
 async function fetchActressDetail(actress_id) {
@@ -272,8 +341,6 @@ function openDetailModal({ title, rows }) {
 
 function videoDetailRows(d) {
   const v = d.video
-
-  // 一行一个名字；若有生日 + 发售日期，则显示年龄（发售年-出生年）
   const actressLines = formatActressesWithAge({ actresses: d.actresses || [], publish_date: v.publish_date }).join('\n')
 
   return [
@@ -284,17 +351,13 @@ function videoDetailRows(d) {
     { k: '有码', v: v.censored === true ? '有码' : (v.censored === false ? '无码' : '') },
     { k: '长度（分钟）', v: v.length != null ? String(v.length) : '' },
 
-    // ✅ 一行一个名字 + 年龄
     { k: '出演女优', v: actressLines },
-
     { k: '女优特点', v: (d.actressTypes || []).join('、') },
     { k: '制服', v: (d.costumes || []).join('、') },
     { k: '场景', v: (d.scenes || []).join('、') },
     { k: '标签', v: (d.tags || []).join('、') },
 
     { k: '总体评分', v: v.video_personal_rate != null ? String(v.video_personal_rate) : '' },
-
-    // ✅ 新增展示：XXX评分（personal_sex_rate）
     { k: 'XXX评分', v: v.personal_sex_rate != null ? String(v.personal_sex_rate) : '' },
 
     { k: '女优评分', v: v.overall_actress_personal_rate != null ? String(v.overall_actress_personal_rate) : '' },
@@ -399,7 +462,9 @@ export function mountSearchBrowsePage({ containerId = 'app' } = {}) {
 
   const input = el('input', { class: 'af-input', type: 'text', placeholder: '输入影片名 / 番号 / 女优名…', autocomplete: 'off' })
   const btn = el('button', { class: 'af-btn', type: 'button', html: '检索' })
-  const hint = el('div', { class: 'af-hint' }, [document.createTextNode('检索：影片名、番号、女优名（并返回该女优出演影片）。后续可在此分支加入过滤功能。')])
+  const hint = el('div', { class: 'af-hint' }, [
+    document.createTextNode('检索：影片名、番号、女优名（并返回该女优出演影片）。后续可在此分支加入过滤功能。'),
+  ])
   const resultMount = el('div')
 
   page.appendChild(el('div', { class: 'af-bar' }, [input, btn]))
